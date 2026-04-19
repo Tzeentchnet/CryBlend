@@ -71,6 +71,7 @@ class CryEngine:
         *,
         material_files: Iterable[str] | None = None,
         object_dir: str | None = None,
+        load_related: bool = True,
     ) -> None:
         self.input_file = input_file
         self.pack_fs = pack_fs
@@ -78,6 +79,11 @@ class CryEngine:
             list(material_files) if material_files else []
         )
         self.object_dir = object_dir
+        # When False, skip auto-discovery of sibling companion geometry
+        # (.cgam/.chrm) and chrparams/CAF animation clips. Material
+        # libraries are still resolved because they are required to
+        # render the imported meshes.
+        self.load_related = load_related
 
         self.models: list[Model] = []
         self.animations: list[Model] = []
@@ -137,7 +143,8 @@ class CryEngine:
             )
 
         input_files = [self.input_file]
-        self._auto_detect_companion(self.input_file, input_files)
+        if self.load_related:
+            self._auto_detect_companion(self.input_file, input_files)
 
         for path in input_files:
             with self.pack_fs.open(path) as stream:
@@ -148,7 +155,8 @@ class CryEngine:
         self._build_skinning()
         self._load_materials()
         self._collect_material_library_files()
-        self._load_animations()
+        if self.load_related:
+            self._load_animations()
 
     # --- companion file discovery -------------------------------------
 

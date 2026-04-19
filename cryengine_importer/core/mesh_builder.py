@@ -156,7 +156,26 @@ def _build_geometry_ivo(
     if not matching:
         return None
 
-    geom.indices = list(mesh.indices)
+    # IVO index buffer is encoded per-subset relative to the *first*
+    # index value of that subset, not as absolute vertex indices.
+    # Mirror C# ColladaModelRenderer.Geometry.cs:
+    #   firstGlobal = indices[subset.FirstIndex]
+    #   global_idx  = (indices[k] - firstGlobal) + subset.FirstVertex
+    # For "well-behaved" subsets indices[FirstIndex] already == FirstVertex
+    # (no-op), but Star Citizen meshes pack later subsets starting at 0.
+    raw_indices = mesh.indices
+    rebased = list(raw_indices)
+    for s in mesh.mesh_subsets:
+        if s.num_indices <= 0 or s.first_index >= len(raw_indices):
+            continue
+        first_global = raw_indices[s.first_index]
+        delta = s.first_vertex - first_global
+        if delta == 0:
+            continue
+        end = s.first_index + s.num_indices
+        for k in range(s.first_index, end):
+            rebased[k] = raw_indices[k] + delta
+    geom.indices = rebased
     geom.subsets = [
         SubsetRange(
             first_index=s.first_index,
