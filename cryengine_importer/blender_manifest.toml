@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+
+id = "cryengine_importer"
+version = "0.1.0"
+name = "CryEngine Importer"
+tagline = "Import CryEngine model files (.cgf, .cga, .chr, .skin)"
+maintainer = "Cryengine-Converter contributors <noreply@example.com>"
+type = "add-on"
+
+website = "https://github.com/Markemp/CryBlend"
+
+blender_version_min = "5.0.0"
+
+license = ["SPDX:MIT"]
+copyright = ["2026 Cryengine-Converter contributors"]
+
+tags = ["Import-Export"]

@@ -1,0 +1,7 @@
+# This project ships as a Blender extension, not a PyPI package.
+# pyproject.toml is here only to configure dev tooling (pytest).
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
