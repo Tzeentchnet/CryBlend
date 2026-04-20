@@ -18,6 +18,7 @@ from ..core.cryengine import CryEngine, UnsupportedFileError
 from ..io.pack_fs import RealFileSystem
 from .._logging import attach_for_operator
 from .asset_metadata import stamp_collection
+from .import_dedup import canonicalize_import_paths as _canonicalize_import_paths
 from .scene_builder import build_scene
 
 
@@ -42,7 +43,9 @@ class IMPORT_OT_cryengine(Operator, ImportHelper):
 
     filename_ext = ".cgf"
     filter_glob: StringProperty(  # type: ignore[valid-type]
-        default="*.cgf;*.cga;*.cgam;*.chr;*.skin",
+        default=(
+            "*.cgf;*.cga;*.cgam;*.cgfm;*.chr;*.chrm;*.skin;*.skinm"
+        ),
         options={"HIDDEN"},
     )
     # Populated by the file browser (multi-select) and by the
@@ -242,7 +245,18 @@ class IMPORT_OT_cryengine(Operator, ImportHelper):
         )
 
     def execute(self, context):  # type: ignore[no-untyped-def]
-        paths = list(self._iter_filepaths())
+        raw_paths = list(self._iter_filepaths())
+        if not raw_paths:
+            self.report({"ERROR"}, "No file selected")
+            return {"CANCELLED"}
+
+        paths, skipped_companions = _canonicalize_import_paths(raw_paths)
+        if skipped_companions:
+            self.report(
+                {"INFO"},
+                f"Skipped {skipped_companions} companion file(s) "
+                f"already covered by their primary.",
+            )
         if not paths:
             self.report({"ERROR"}, "No file selected")
             return {"CANCELLED"}
@@ -275,7 +289,7 @@ class IO_FH_cryengine(bpy.types.FileHandler):
     bl_idname = "IO_FH_cryengine"
     bl_label = "CryEngine"
     bl_import_operator = IMPORT_OT_cryengine.bl_idname
-    bl_file_extensions = ".cgf;.cga;.cgam;.chr;.skin"
+    bl_file_extensions = ".cgf;.cga;.cgam;.cgfm;.chr;.chrm;.skin;.skinm"
 
     @classmethod
     def poll_drop(cls, context):  # type: ignore[no-untyped-def]

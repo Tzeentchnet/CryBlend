@@ -56,8 +56,33 @@ if TYPE_CHECKING:
 
 
 _VALID_EXTENSIONS = frozenset(
-    {".cgf", ".cga", ".cgam", ".chr", ".skin", ".anim", ".soc", ".caf", ".dba"}
+    {
+        ".cgf",
+        ".cga",
+        ".cgam",
+        ".cgfm",
+        ".chr",
+        ".chrm",
+        ".skin",
+        ".skinm",
+        ".anim",
+        ".soc",
+        ".caf",
+        ".dba",
+    }
 )
+
+# Companion (geometry-only "m") extensions paired with their primary.
+# When the user picks the companion directly we transparently load the
+# primary instead so material/skinning metadata is included.
+COMPANION_GEOMETRY_PRIMARY: dict[str, str] = {
+    ".cgam": ".cga",
+    ".cgfm": ".cgf",
+    ".chrm": ".chr",
+    ".skinm": ".skin",
+}
+# Backwards-compatible alias used internally by ``CryEngine.process``.
+_COMPANION_TO_PRIMARY = COMPANION_GEOMETRY_PRIMARY
 
 
 class UnsupportedFileError(ValueError):
@@ -144,6 +169,22 @@ class CryEngine:
                 f"Unsupported file extension {ext!r}: expected one of "
                 f"{sorted(_VALID_EXTENSIONS)}"
             )
+
+        # If the user picked a companion geometry-only file
+        # (.cgam/.cgfm/.chrm/.skinm), transparently swap to the primary
+        # when it exists so material/skinning metadata is loaded too.
+        primary_ext = _COMPANION_TO_PRIMARY.get(ext)
+        if primary_ext is not None:
+            primary_path = str(
+                PurePosixPath(self.input_file).with_suffix(primary_ext)
+            )
+            if self.pack_fs.exists(primary_path):
+                logger.info(
+                    "input %s is a companion file; loading primary %s instead",
+                    self.input_file,
+                    primary_path,
+                )
+                self.input_file = primary_path
 
         input_files = [self.input_file]
         if self.load_related:
@@ -865,4 +906,4 @@ def _longest_track_time(tracks: list[BoneAnimationTrack]) -> float:
     return max_time
 
 
-__all__ = ["CryEngine", "UnsupportedFileError"]
+__all__ = ["CryEngine", "UnsupportedFileError", "COMPANION_GEOMETRY_PRIMARY"]

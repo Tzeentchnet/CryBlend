@@ -68,6 +68,28 @@ python scripts/build_extension.py
   SC 4.5+ chunk-type IDs and ArcheAge controller variants
   (`Controller_827/828/830/831`)
 
+### Bulk import & companion-file dedup
+
+You can multi-select or drag-and-drop any number of geometry files
+into Blender at once. Before the import loop runs, the operator
+canonicalises the dropped paths so each asset is imported exactly
+once:
+
+- Exact-path duplicates are collapsed; on Windows the comparison is
+  case-insensitive (matching NTFS).
+- When a geometry companion (`.cgam` / `.cgfm` / `.chrm` / `.skinm`)
+  appears in the **same batch** as its primary (`.cga` / `.cgf` /
+  `.chr` / `.skin`), the companion is dropped — the primary's
+  importer pulls the companion in automatically. A skipped-count
+  is surfaced as an `INFO` report.
+- A companion dropped on its own (no primary in the batch) is still
+  imported; the parser will transparently load the on-disk primary
+  beside it when present, so the asset still resolves to a single
+  Blender collection.
+
+This means dragging an entire folder of `.cgf` + `.cgfm` pairs is
+safe — each asset is built once, not twice.
+
 ## Post-import sidebar panel
 
 Every imported asset gets stamped with metadata on its Blender
