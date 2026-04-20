@@ -2,7 +2,7 @@
 
 Run inside Blender (4.x / 5.x):
 
-    blender --background --python tests/headless_smoke.py -- <path/to/file.cgf>
+    blender --background --python tests/headless_smoke.py -- [--verbose] <path/to/file.cgf>
 
 What it does:
 - Adds the parent ``blender_addon/`` folder to ``sys.path`` so the
@@ -24,20 +24,27 @@ import traceback
 from pathlib import Path
 
 
-def _parse_argv() -> str:
+def _parse_argv() -> tuple[str, bool]:
     if "--" not in sys.argv:
         raise SystemExit(
             "Usage: blender --background --python tests/headless_smoke.py "
-            "-- <path/to/file.cgf>"
+            "-- [--verbose] <path/to/file.cgf>"
         )
     rest = sys.argv[sys.argv.index("--") + 1 :]
+    verbose = False
+    while rest and rest[0].startswith("-"):
+        flag = rest.pop(0)
+        if flag in ("-v", "--verbose"):
+            verbose = True
+        else:
+            raise SystemExit(f"Unknown flag {flag!r}")
     if not rest:
         raise SystemExit("Missing input file after '--'.")
-    return rest[0]
+    return rest[0], verbose
 
 
 def main() -> int:
-    input_file = _parse_argv()
+    input_file, verbose = _parse_argv()
     if not os.path.isfile(input_file):
         print(f"[smoke] input file not found: {input_file}", file=sys.stderr)
         return 2
@@ -55,7 +62,9 @@ def main() -> int:
 
     register()
     try:
-        result = bpy.ops.import_scene.cryengine(filepath=input_file)
+        result = bpy.ops.import_scene.cryengine(
+            filepath=input_file, verbose=verbose
+        )
         if "FINISHED" not in result:
             print(f"[smoke] operator returned {result}", file=sys.stderr)
             return 3

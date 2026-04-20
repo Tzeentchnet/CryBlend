@@ -18,6 +18,7 @@ The Star Citizen IVO branch is handled in Phase 5.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Iterable, Iterator
@@ -46,6 +47,8 @@ from .model import Model
 from ..enums import MtlNameType
 from ..models.animation import AnimationClip, BoneAnimationTrack, ChrParams
 from ..models.skinning import SkinningInfo
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .chunk_registry import Chunk
@@ -151,12 +154,44 @@ class CryEngine:
                 self.models.append(Model.from_stream(path, stream))
 
         self._chunks_cache = None
+        sig = self.models[0].file_signature if self.models else "?"
+        logger.info(
+            "loaded %d file(s) for %s (signature %r): %s",
+            len(self.models),
+            self.name,
+            sig,
+            input_files,
+        )
+        logger.info(
+            "%d total chunks across loaded files", len(self.chunks)
+        )
+
         self._build_nodes()
+        logger.info(
+            "built %d nodes (%s path)",
+            len(self.nodes),
+            "IVO" if self.is_ivo else "legacy",
+        )
         self._build_skinning()
+        if self.skinning_info.has_skinning_info:
+            logger.info(
+                "skinning: %d compiled bones, %d physical bones, %d int verts",
+                len(self.skinning_info.compiled_bones),
+                len(self.skinning_info.physical_bones),
+                len(self.skinning_info.int_vertices),
+            )
         self._load_materials()
         self._collect_material_library_files()
+        logger.info(
+            "materials: %d/%d libraries resolved",
+            len(self.materials),
+            len(self.material_library_files),
+        )
         if self.load_related:
             self._load_animations()
+            logger.info(
+                "animations: %d clip(s) loaded", len(self.animation_clips)
+            )
 
     # --- companion file discovery -------------------------------------
 
@@ -169,6 +204,10 @@ class CryEngine:
         m_path = path[: -len(ext)] + ext + "m"
         if self.pack_fs.exists(m_path):
             input_files.append(m_path)
+        else:
+            logger.debug(
+                "no companion geometry file found at %s", m_path
+            )
 
     # --- node hierarchy -----------------------------------------------
 
@@ -438,6 +477,9 @@ class CryEngine:
         try:
             self.chrparams = load_chrparams(chrparams_path, self.pack_fs)
         except Exception:
+            logger.warning(
+                "failed to load chrparams %s", chrparams_path, exc_info=True
+            )
             self.chrparams = None
 
         anim_paths: list[tuple[str, str]] = []  # (clip_name, file_path)
@@ -458,6 +500,9 @@ class CryEngine:
                 try:
                     cal = load_cal_with_includes(cal_path, self.pack_fs)
                 except Exception:
+                    logger.warning(
+                        "failed to load cal %s", cal_path, exc_info=True
+                    )
                     cal = None
                 if cal is not None:
                     base_dir = (cal.file_path or "").replace("\\", "/").strip("/")
@@ -475,6 +520,9 @@ class CryEngine:
                 with self.pack_fs.open(path) as stream:
                     model = Model.from_stream(path, stream)
             except Exception:
+                logger.warning(
+                    "failed to load animation file %s", path, exc_info=True
+                )
                 continue
             self.animation_models.append(model)
             clip = self._build_clip_from_caf(clip_name, model)
@@ -784,14 +832,23 @@ class CryEngine:
 def _matrix3x4_to_4x4(
     m: tuple[tuple[float, ...], ...],
 ) -> tuple[tuple[float, ...], ...]:
-    """Promote a row-major 3x4 (3 rows of 4 floats) to a row-major 4x4
-    by appending the standard ``(0, 0, 0, 1)`` row. Used by the IVO
-    branch where ``NodeMeshCombo.bone_to_world`` is a Matrix3x4."""
+    """Convert a CryEngine ``Matrix3x4`` (translation in column 4 —
+    ``M14, M24, M34``) into the row-major 4x4 with translation in row 4
+    used by :class:`ChunkNode` and consumed by the Blender bridge.
+
+    Mirrors C# ``Matrix3x4.ConvertToLocalTransformMatrix``: transposes
+    the 3x3 rotation and moves the column-4 translation into row 4.
+    Without this swap the IVO ``NodeMeshCombo`` branch produces
+    transforms that look like the identity (translation lands in
+    column 3 where downstream code never reads it), which leaves every
+    multi-node IVO ``.cga`` mesh stacked at the world origin instead
+    of parented to its bone.
+    """
     return (
-        tuple(m[0]),
-        tuple(m[1]),
-        tuple(m[2]),
-        (0.0, 0.0, 0.0, 1.0),
+        (m[0][0], m[1][0], m[2][0], 0.0),
+        (m[0][1], m[1][1], m[2][1], 0.0),
+        (m[0][2], m[1][2], m[2][2], 0.0),
+        (m[0][3], m[1][3], m[2][3], 1.0),
     )
 
 

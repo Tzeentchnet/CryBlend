@@ -386,7 +386,13 @@ def test_build_geometry_ivo_filters_subsets_by_node_parent_index() -> None:
     geom = build_geometry(node1)
     assert geom is not None
     assert [s.mat_id for s in geom.subsets] == [2]
-    assert geom.subsets[0].first_index == 3
+    # The IVO index buffer is sliced down to only the matching subsets
+    # and the vertex pool is compacted, so the surviving subset is
+    # rebased to start at 0 of the new (per-node) buffer.
+    assert geom.subsets[0].first_index == 0
+    assert geom.subsets[0].num_indices == 3
+    assert geom.indices == [0, 1, 2]
+    assert geom.positions == [(3.0, 0.0, 0.0), (4.0, 0.0, 0.0), (5.0, 0.0, 0.0)]
 
 
 def test_build_geometry_ivo_returns_none_when_node_has_no_matching_subsets() -> None:

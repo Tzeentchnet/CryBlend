@@ -11,12 +11,15 @@ load time anyway.
 
 from __future__ import annotations
 
+import logging
 from pathlib import PurePosixPath
 from typing import Iterable
 
 from ..io.cry_xml import read_stream
 from ..io.pack_fs import IPackFileSystem
 from .material import Material
+
+logger = logging.getLogger(__name__)
 
 
 _MTL_EXTENSIONS = (".mtl", ".xml")
@@ -31,12 +34,16 @@ def load_material(
         # Try the .mtl extension explicitly (the chunk name often omits it).
         if not path.lower().endswith(_MTL_EXTENSIONS):
             return load_material(path + ".mtl", pack_fs)
+        logger.debug("material lookup miss: %s", path)
         return None
 
     try:
         with pack_fs.open(path) as stream:
             root = read_stream(stream)
     except Exception:
+        logger.warning(
+            "failed to parse material library %s", path, exc_info=True
+        )
         return None
 
     mat = Material.from_xml_root(root)
@@ -68,6 +75,11 @@ def load_material_libraries(
                 break
 
         if loaded is None:
+            logger.warning(
+                "material library not found: %s (tried %s)",
+                raw,
+                candidates,
+            )
             continue
 
         key = PurePosixPath(raw).stem.lower() or raw.lower()

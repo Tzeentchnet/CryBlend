@@ -10,6 +10,7 @@ aggregator (Phase 1.5) consumes.
 
 from __future__ import annotations
 
+import logging
 from typing import BinaryIO
 
 from ..enums import ChunkType, FileType, FileVersion
@@ -17,6 +18,8 @@ from ..io.binary_reader import BinaryReader
 from . import chunks  # noqa: F401  -- triggers @chunk registration
 from .chunk_registry import Chunk, make_chunk, make_header
 from .chunks.header import ChunkHeader
+
+logger = logging.getLogger(__name__)
 
 
 class Model:
@@ -111,6 +114,13 @@ class Model:
             except Exception:
                 # Defensive: never let one bad chunk abort the file.
                 # The aggregator can decide whether to surface this.
-                pass
+                logger.warning(
+                    "failed to read chunk id=%s type=%s version=0x%x at offset=0x%x",
+                    hdr.id,
+                    hdr.chunk_type,
+                    hdr.version_raw,
+                    hdr.offset,
+                    exc_info=True,
+                )
             ck.skip_to_end(br)
             self.chunk_map[hdr.id] = ck

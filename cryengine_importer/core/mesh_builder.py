@@ -15,6 +15,8 @@ is the right lookup table.
 
 from __future__ import annotations
 
+import logging
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from ..enums import DatastreamType
@@ -27,6 +29,8 @@ from .chunks.morph_targets import ChunkCompiledMorphTargets
 
 if TYPE_CHECKING:
     from .chunks.node import ChunkNode
+
+logger = logging.getLogger(__name__)
 
 
 def build_geometry(node: "ChunkNode") -> MeshGeometry | None:
@@ -148,11 +152,30 @@ def _build_geometry_ivo(
     if mesh.normals:
         geom.normals = list(mesh.normals)
 
+    # Dequantize SNORM16-packed positions back to model-space metres
+    # using the bbox carried in the IvoGeometryMeshDetails. Mirrors C#
+    # ColladaModelRenderer.WriteGeometries / BaseGltfRenderer for IVO
+    # CGF/CGA assets (skin / chr files keep snorm coordinates because
+    # bones supply the world transform). Without this step Star Citizen
+    # vehicles like the Greycat PTV import as a unit cube and look
+    # squished along whichever axes the bbox extends past 1 m.
+    _apply_ivo_position_scale(geom, mesh, node)
+
     node_idx = node.ivo_node_index
     matching = [
         s for s in mesh.mesh_subsets
         if node_idx is None or s.node_parent_index == node_idx
     ]
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "ivo node %r idx=%s: %d/%d subsets, verts=%d indices=%d",
+            node.name,
+            node_idx,
+            len(matching),
+            len(mesh.mesh_subsets),
+            len(geom.positions),
+            len(mesh.indices),
+        )
     if not matching:
         return None
 
@@ -175,22 +198,116 @@ def _build_geometry_ivo(
         end = s.first_index + s.num_indices
         for k in range(s.first_index, end):
             rebased[k] = raw_indices[k] + delta
-    geom.indices = rebased
-    geom.subsets = [
-        SubsetRange(
-            first_index=s.first_index,
-            num_indices=s.num_indices,
-            first_vertex=s.first_vertex,
-            num_vertices=s.num_vertices,
-            mat_id=s.mat_id,
+    # Slice the (shared) index buffer down to only the matching
+    # subsets, then compact the vertex pool so this per-node Blender
+    # mesh holds only its own triangles + their referenced vertices.
+    # Without this slice, every Geometry-type NodeMeshCombo entry
+    # would receive the entire combined index buffer and therefore
+    # render the whole mech, producing N stacked duplicates in the
+    # scene (one per geometry node) — see ARGO ATLS Mcarog.cga.
+    sliced_indices: list[int] = []
+    sliced_subsets: list[SubsetRange] = []
+    for s in matching:
+        end = s.first_index + s.num_indices
+        if s.num_indices <= 0 or end > len(rebased):
+            logger.debug(
+                "ivo node %r: skipping subset first_index=%d num_indices=%d "
+                "(rebased len=%d)",
+                node.name,
+                s.first_index,
+                s.num_indices,
+                len(rebased),
+            )
+            continue
+        if logger.isEnabledFor(logging.DEBUG):
+            first_global = (
+                raw_indices[s.first_index] if s.first_index < len(raw_indices) else -1
+            )
+            delta = s.first_vertex - first_global
+            logger.debug(
+                "ivo node %r subset: first_index=%d num_indices=%d "
+                "first_vertex=%d num_vertices=%d mat_id=%d delta=%d",
+                node.name,
+                s.first_index,
+                s.num_indices,
+                s.first_vertex,
+                s.num_vertices,
+                s.mat_id,
+                delta,
+            )
+        new_first = len(sliced_indices)
+        sliced_indices.extend(rebased[s.first_index:end])
+        sliced_subsets.append(
+            SubsetRange(
+                first_index=new_first,
+                num_indices=s.num_indices,
+                first_vertex=s.first_vertex,
+                num_vertices=s.num_vertices,
+                mat_id=s.mat_id,
+            )
         )
-        for s in matching
-    ]
+
+    if not sliced_indices:
+        return None
+
+    # Compact the vertex pool to only the vertices this node uses.
+    # Subsets' first_vertex/num_vertices are no longer authoritative
+    # after compaction, but the Blender bridge only consumes
+    # first_index/num_indices/mat_id on the SubsetRange.
+    old_to_new: dict[int, int] = {}
+    new_positions: list[tuple[float, float, float]] = []
+    new_uvs = [] if geom.uvs is not None else None
+    new_colors = [] if geom.colors is not None else None
+    new_normals = [] if geom.normals is not None else None
+    pos_src = geom.positions
+    uv_src = geom.uvs
+    col_src = geom.colors
+    nrm_src = geom.normals
+    for old_idx in sliced_indices:
+        if old_idx not in old_to_new:
+            old_to_new[old_idx] = len(new_positions)
+            new_positions.append(pos_src[old_idx])
+            if new_uvs is not None and uv_src is not None and old_idx < len(uv_src):
+                new_uvs.append(uv_src[old_idx])
+            if new_colors is not None and col_src is not None and old_idx < len(col_src):
+                new_colors.append(col_src[old_idx])
+            if new_normals is not None and nrm_src is not None and old_idx < len(nrm_src):
+                new_normals.append(nrm_src[old_idx])
+
+    geom.positions = new_positions
+    geom.uvs = new_uvs
+    geom.colors = new_colors
+    geom.normals = new_normals
+    geom.indices = [old_to_new[i] for i in sliced_indices]
+    geom.subsets = sliced_subsets
+
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "ivo node %r: compacted to %d verts, %d indices, %d subsets",
+            node.name,
+            len(geom.positions),
+            len(geom.indices),
+            len(geom.subsets),
+        )
 
     if mesh.model is not None:
-        geom.morph_targets = _collect_morph_targets(
-            mesh.model.chunk_map, len(geom.positions)
+        # Morph targets reference the IvoSkinMesh's *original* vertex
+        # ids; remap them through the compaction map and drop entries
+        # that don't touch this node's vertices.
+        morphs = _collect_morph_targets(
+            mesh.model.chunk_map, len(pos_src)
         )
+        if morphs:
+            remapped: list[MorphTarget] = []
+            for m in morphs:
+                verts = [
+                    (old_to_new[old_id], pos)
+                    for old_id, pos in m.vertices
+                    if old_id in old_to_new
+                ]
+                if verts:
+                    remapped.append(MorphTarget(name=m.name, vertices=verts))
+            geom.morph_targets = remapped
 
     return geom
 
@@ -223,3 +340,55 @@ def _collect_morph_targets(
             continue
         out.append(MorphTarget(name=f"Morph_{chunk_id:X}", vertices=verts))
     return out
+
+
+def _apply_ivo_position_scale(
+    geom: MeshGeometry, mesh: ChunkIvoSkinMesh, node: "ChunkNode"
+) -> None:
+    """Map snorm16 IVO vertex positions back to model-space metres.
+
+    Mirrors C# ``ColladaModelRenderer.WriteGeometries`` for IVO files:
+    when the source asset is a CGF/CGA, vertices are stored as snorm16
+    in [-1, 1] and must be re-scaled by the mesh's bounding box (or
+    ScalingBoundingBox when present)::
+
+        center  = (max + min) / 2
+        extent  = abs(max - min) / 2          # min-capped to 1 / axis
+        vertex' = vertex * extent + center
+
+    Skinned meshes (``.skin`` / ``.chr``) keep snorm coordinates because
+    their bones supply the world transform.
+
+    No-ops when the verts/UV stream is uncompressed (``bpe == 20``,
+    full float32 positions) or when the vertex range is already outside
+    [-1, 1].
+    """
+    if not geom.positions:
+        return
+    if mesh.verts_uvs_bpe and mesh.verts_uvs_bpe != 16:
+        return
+    file_name = mesh.model.file_name if mesh.model is not None else None
+    if file_name is not None:
+        ext = PurePosixPath(file_name).suffix.lower()
+        if ext in (".skin", ".chr"):
+            return
+
+    details = mesh.mesh_details
+    bbox = details.scaling_bounding_box
+    if bbox == ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)):
+        bbox = details.bounding_box
+    (mn, mx) = bbox
+    if mn == mx:
+        return
+
+    cx = (mx[0] + mn[0]) * 0.5
+    cy = (mx[1] + mn[1]) * 0.5
+    cz = (mx[2] + mn[2]) * 0.5
+    ex = max(1.0, abs(mx[0] - mn[0]) * 0.5)
+    ey = max(1.0, abs(mx[1] - mn[1]) * 0.5)
+    ez = max(1.0, abs(mx[2] - mn[2]) * 0.5)
+
+    geom.positions = [
+        (px * ex + cx, py * ey + cy, pz * ez + cz)
+        for (px, py, pz) in geom.positions
+    ]

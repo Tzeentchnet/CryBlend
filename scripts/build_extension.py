@@ -65,7 +65,9 @@ def build(out_zip: Path) -> None:
 
     addon_root_name = ADDON_DIR.name
     files = iter_addon_files()
-    with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(
+        out_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+    ) as zf:
         for file in files:
             # Blender expects manifest at zip root OR inside a single
             # top-level folder. We use the addon folder name as the

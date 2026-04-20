@@ -8,13 +8,15 @@ import bpy  # type: ignore[import-not-found]
 from bpy.props import (  # type: ignore[import-not-found]
     BoolProperty,
     CollectionProperty,
+    EnumProperty,
     StringProperty,
 )
 from bpy.types import Operator, OperatorFileListElement  # type: ignore[import-not-found]
-from bpy_extras.io_utils import ImportHelper  # type: ignore[import-not-found]
+from bpy_extras.io_utils import ImportHelper, axis_conversion  # type: ignore[import-not-found]
 
 from ..core.cryengine import CryEngine, UnsupportedFileError
 from ..io.pack_fs import RealFileSystem
+from .._logging import attach_for_operator
 from .scene_builder import build_scene
 
 
@@ -60,11 +62,62 @@ class IMPORT_OT_cryengine(Operator, ImportHelper):
         ),
         default=True,
     )
+    convert_axes: BoolProperty(  # type: ignore[valid-type]
+        name="Convert to Blender Orientation",
+        description=(
+            "Rotate the imported asset so its CryEngine axes "
+            "(Z-up, +Y-forward) align with Blender's "
+            "(Z-up, -Y-forward). Disable to keep the raw "
+            "CryEngine orientation."
+        ),
+        default=True,
+    )
+    axis_forward: EnumProperty(  # type: ignore[valid-type]
+        name="Forward",
+        description="Which CryEngine axis points forward in the source asset",
+        items=(
+            ("X", "X", ""),
+            ("Y", "Y", ""),
+            ("Z", "Z", ""),
+            ("-X", "-X", ""),
+            ("-Y", "-Y", ""),
+            ("-Z", "-Z", ""),
+        ),
+        default="Y",
+    )
+    axis_up: EnumProperty(  # type: ignore[valid-type]
+        name="Up",
+        description="Which CryEngine axis points up in the source asset",
+        items=(
+            ("X", "X", ""),
+            ("Y", "Y", ""),
+            ("Z", "Z", ""),
+            ("-X", "-X", ""),
+            ("-Y", "-Y", ""),
+            ("-Z", "-Z", ""),
+        ),
+        default="Z",
+    )
+    verbose: BoolProperty(  # type: ignore[valid-type]
+        name="Verbose Logging",
+        description=(
+            "Emit DEBUG-level logs from the importer to Blender's "
+            "System Console. Use this when an import looks wrong but "
+            "completes without an error message."
+        ),
+        default=False,
+    )
 
     def draw(self, context):  # type: ignore[no-untyped-def]
         layout = self.layout
         layout.prop(self, "import_related")
         layout.prop(self, "object_dir")
+        layout.prop(self, "convert_axes")
+        col = layout.column()
+        col.enabled = self.convert_axes
+        col.prop(self, "axis_forward")
+        col.prop(self, "axis_up")
+        layout.prop(self, "verbose")
 
     def invoke(self, context, event):  # type: ignore[no-untyped-def]
         # When invoked via drag-and-drop the FileHandler pre-fills
@@ -101,23 +154,47 @@ class IMPORT_OT_cryengine(Operator, ImportHelper):
             pack_fs = CascadedPackFileSystem([obj_dir_fs, pack_fs])
         rel_path = os.path.basename(filepath)
 
-        try:
-            asset = CryEngine(
-                rel_path,
-                pack_fs,  # type: ignore[arg-type]
-                object_dir=self.object_dir or None,
-                load_related=self.import_related,
-            )
-            asset.process()
-        except UnsupportedFileError as exc:
-            return False, str(exc)
-        except Exception as exc:  # pragma: no cover - exercised in Blender
-            return False, f"Failed to parse {filepath}: {exc}"
+        with attach_for_operator(self, verbose=self.verbose):
+            try:
+                asset = CryEngine(
+                    rel_path,
+                    pack_fs,  # type: ignore[arg-type]
+                    object_dir=self.object_dir or None,
+                    load_related=self.import_related,
+                )
+                asset.process()
+            except UnsupportedFileError as exc:
+                return False, str(exc)
+            except Exception as exc:  # pragma: no cover - exercised in Blender
+                return False, f"Failed to parse {filepath}: {exc}"
 
-        try:
-            collection = build_scene(asset)
-        except Exception as exc:  # pragma: no cover - exercised in Blender
-            return False, f"Failed to build scene for {filepath}: {exc}"
+            try:
+                global_matrix = None
+                if self.convert_axes:
+                    global_matrix = axis_conversion(
+                        from_forward=self.axis_forward,
+                        from_up=self.axis_up,
+                        to_forward="-Y",
+                        to_up="Z",
+                    ).to_4x4()
+                collection = build_scene(asset, global_matrix=global_matrix)
+            except Exception as exc:  # pragma: no cover - exercised in Blender
+                return False, f"Failed to build scene for {filepath}: {exc}"
+
+            # Surface a hint when material libraries silently failed to
+            # resolve and the user didn't supply an object directory.
+            if (
+                asset.material_library_files
+                and len(asset.materials) < len(asset.material_library_files)
+                and not self.object_dir
+            ):
+                self.report(
+                    {"WARNING"},
+                    f"{len(asset.material_library_files) - len(asset.materials)} "
+                    f"material librar(y/ies) failed to resolve. Set the "
+                    f"'Object Directory' field in the import dialog to your "
+                    f"game's data root (where 'Objects/' lives).",
+                )
 
         return True, (
             f"Imported {asset.name}: {len(asset.nodes)} nodes, "

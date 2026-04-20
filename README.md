@@ -5,8 +5,10 @@ A pure-Python Blender add-on that imports CryEngine model files
 Star Citizen `#ivo` variants) directly into Blender.
 
 This add-on is a port of the C# [Cryengine-Converter](https://github.com/Markemp/Cryengine-Converter)
-project (v2.0.0 is the authoritative spec). Each Python module
-references the C# file it was ported from.
+project (v2.0.0 is the authoritative spec). Most parsing modules cite
+the C# file they were ported from in their docstring; the `blender/`
+adapters are Blender-specific and have no direct C# counterpart (the
+C# tree targets Wavefront / Collada / USD exporters, not Blender).
 
 Status: **work in progress** — see [roadmap.md](roadmap.md) for the
 phased implementation plan and [changelog.md](changelog.md) for what
@@ -18,7 +20,7 @@ has shipped.
 
 1. Download `cryengine_importer-<version>.zip` from the
    [Releases](https://github.com/Markemp/CryBlend/releases) page.
-2. In Blender 4.2+: **Edit → Preferences → Get Extensions → ⌄ → Install
+2. In Blender 5.0+: **Edit → Preferences → Get Extensions → ⌄ → Install
    from Disk…** and pick the zip. Or simply drag the zip into the
    Blender window.
 3. Use **File → Import → CryEngine (.cgf/.chr/.skin)**.

@@ -14,9 +14,13 @@ real mesh data lives in a sibling :class:`ChunkIvoSkinMesh` (the
 
 from __future__ import annotations
 
+import logging
+
 from ...enums import ChunkType, IvoGeometryType
 from ...models.ivo import NodeMeshCombo
 from ..chunk_registry import Chunk, chunk
+
+logger = logging.getLogger(__name__)
 
 
 class ChunkNodeMeshCombo(Chunk):
@@ -56,10 +60,26 @@ class ChunkNodeMeshCombo900(ChunkNodeMeshCombo):
         self.unknown1 = br.read_i32()
         self.unknown3 = br.read_i32()
 
-        # SC 4.5+ added 32 bytes of padding after the header (matches
-        # v2.0.0 ChunkNodeMeshCombo_900; pre-v2 files had this region
-        # as zeros so the unconditional skip is backward-compatible).
-        br.skip(32)
+        # SC 4.5+ added 32 bytes of zero padding after the header.
+        # Older Star Citizen builds (the format CgfConverter v1.7
+        # targeted) have no padding — node data starts immediately.
+        # The reference C# v2.0.0 unconditionally skips 32 bytes,
+        # which silently produces garbage transforms on pre-4.5
+        # assets (e.g. ARGO ATLS Mcarog.cga). Detect by peeking:
+        # if the next 32 bytes are all zero, treat as padding;
+        # otherwise the data starts here.
+        peek = br.read_bytes(32)
+        if any(b != 0 for b in peek):
+            br.seek(-32, 1)
+            logger.debug(
+                "NodeMeshCombo: no 32-byte zero padding (pre-SC4.5 layout); "
+                "first peek bytes=%s",
+                peek[:8].hex(),
+            )
+        else:
+            logger.debug(
+                "NodeMeshCombo: detected 32-byte zero padding (SC4.5+ layout)"
+            )
 
         for _ in range(self.number_of_nodes):
             n = NodeMeshCombo()
@@ -91,3 +111,19 @@ class ChunkNodeMeshCombo900(ChunkNodeMeshCombo):
         self.node_names = _read_null_separated_strings(
             br, self.number_of_nodes, self.string_table_size
         )
+
+        if logger.isEnabledFor(logging.DEBUG):
+            for i, n in enumerate(self.node_mesh_combos[:3]):
+                name = self.node_names[i] if i < len(self.node_names) else "?"
+                logger.debug(
+                    "NodeMeshCombo[%d] name=%r id=%d parent=%d geom_type=%s "
+                    "mesh_chunk_id=%d num_verts=%d bone_to_world.translation=%s",
+                    i,
+                    name,
+                    n.id,
+                    n.parent_index,
+                    n.geometry_type,
+                    n.mesh_chunk_id,
+                    n.number_of_vertices,
+                    getattr(n.bone_to_world, "translation", n.bone_to_world),
+                )

@@ -20,8 +20,11 @@ Skinning / armature are deferred to Phase 3.
 
 from __future__ import annotations
 
+import logging
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 import bpy  # type: ignore[import-not-found]
 from mathutils import Matrix  # type: ignore[import-not-found]
@@ -43,8 +46,16 @@ def build_scene(
     cryengine: "CryEngine",
     *,
     collection: "bpy.types.Collection | None" = None,
+    global_matrix: "Matrix | None" = None,
 ) -> "bpy.types.Collection":
-    """Materialize ``cryengine`` into ``collection`` (or a new one)."""
+    """Materialize ``cryengine`` into ``collection`` (or a new one).
+
+    ``global_matrix`` is an optional 4x4 applied to the world transform
+    of every root-level imported object. Use this to convert from the
+    CryEngine orientation (Z-up, +Y-forward) into Blender's
+    (Z-up, -Y-forward) — see :func:`bpy_extras.io_utils.axis_conversion`.
+    Children inherit the rotation through their parent.
+    """
     if collection is None:
         collection = bpy.data.collections.new(cryengine.name)
         bpy.context.scene.collection.children.link(collection)
@@ -81,6 +92,15 @@ def build_scene(
             # --- animation (Phase 4) ---------------------------------
             if cryengine.animation_clips:
                 build_actions(cryengine, arm_obj)
+
+    # --- axis conversion (applied last so it covers armature roots
+    # produced by attach_skin reparenting). Premultiplies every
+    # parent-less object's world matrix by ``global_matrix``; children
+    # inherit through the parent chain.
+    if global_matrix is not None:
+        for obj in collection.objects:
+            if obj.parent is None:
+                obj.matrix_world = global_matrix @ obj.matrix_world
 
     return collection
 
@@ -174,7 +194,11 @@ def _build_bpy_mesh(
             for loop in mesh.loops:
                 color_layer.data[loop.index].color = geom.colors[loop.vertex_index]
         except Exception:  # pragma: no cover - bpy version variance
-            pass
+            logger.debug(
+                "failed to attach color attribute to %r",
+                getattr(mesh, "name", "?"),
+                exc_info=True,
+            )
 
     if geom.subsets:
         slot_for_mat: dict[int, int] = {}
@@ -202,7 +226,11 @@ def _build_bpy_mesh(
         try:
             mesh.normals_split_custom_set_from_vertices(geom.normals)
         except Exception:  # pragma: no cover - bpy version variance
-            pass
+            logger.debug(
+                "failed to set custom split normals on %r",
+                getattr(mesh, "name", "?"),
+                exc_info=True,
+            )
 
     mesh.validate(clean_customdata=False)
     return mesh
@@ -238,7 +266,11 @@ def _apply_shape_keys(
                 if 0 <= vertex_id < n:
                     kd[vertex_id].co = pos
     except Exception:  # pragma: no cover - bpy version variance
-        pass
+        logger.debug(
+            "failed to apply shape keys on %r",
+            getattr(obj_owner, "name", "?"),
+            exc_info=True,
+        )
 
 
 def _resolve_material(

@@ -13,6 +13,23 @@ The upstream C# converter is tracked separately at
 
 ### Added
 
+- **Phase 8 — distribution.** `scripts/build_extension.py` is now
+  submission-ready: bumped to `compresslevel=9` (matches
+  `blender --command extension build`), still skips `__pycache__/` and
+  `.pyc`/`.pyo`, and zips `cryengine_importer/` as a single top-level
+  subdir so Blender's `pkg_zipfile_detect_subdir_or_none` picks it up
+  cleanly. `blender_manifest.toml` gains a `[permissions] files`
+  declaration (the importer reads `.cgf`/`.mtl`/`.dds` from disk) plus
+  a real maintainer contact. New `tests/parser/test_build_extension.py`
+  (5 tests) round-trips the built zip and asserts the layout Blender's
+  installer requires: single top-level `cryengine_importer/` subdir,
+  manifest + `__init__.py` next to it, no cache artefacts, and the zip
+  filename matches the manifest version. README install steps updated
+  to Blender 5.0+ to match `blender_version_min`. The actual
+  extensions.blender.org submission is pending a one-shot
+  `blender --command extension validate` on a machine that has Blender
+  5.0+ on PATH.
+
 - **Phase 7 — physics & misc.** New
   `core/chunks/mesh_physics_data.py` with `ChunkMeshPhysicsData_800`,
   a registered no-op reader that mirrors the C# stub

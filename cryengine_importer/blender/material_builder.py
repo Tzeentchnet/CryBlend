@@ -20,8 +20,11 @@ can fix it up in Blender.
 
 from __future__ import annotations
 
+import logging
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 import bpy  # type: ignore[import-not-found]
 
@@ -124,7 +127,11 @@ def _add_texture_node(
         try:
             node.image.colorspace_settings.name = "Non-Color"
         except Exception:  # pragma: no cover - bpy version variance
-            pass
+            logger.debug(
+                "failed to set Non-Color colorspace on %r",
+                getattr(node.image, "name", "?"),
+                exc_info=True,
+            )
     return node
 
 
@@ -182,6 +189,9 @@ def _load_image(
                     if resolved_disk is not None:
                         break
             except Exception:
+                logger.debug(
+                    "pack_fs lookup failed for %r", cand, exc_info=True
+                )
                 continue
 
     if resolved_disk is None and image_search_root is not None:
@@ -200,7 +210,9 @@ def _load_image(
         try:
             return bpy.data.images.load(resolved_disk, check_existing=True)
         except Exception:
-            pass
+            logger.info(
+                "failed to load image from disk: %s", resolved_disk, exc_info=True
+            )
 
     # Create a placeholder image so the node still has *something* and
     # the user can relink it from the UI.
@@ -216,6 +228,9 @@ def _pack_fs_disk_path(pack_fs: "IPackFileSystem", path: str) -> str | None:
     try:
         result = resolver(path)
     except Exception:
+        logger.debug(
+            "pack_fs resolver raised for %r", path, exc_info=True
+        )
         return None
     return str(result) if result is not None else None
 

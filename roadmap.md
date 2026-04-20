@@ -229,13 +229,66 @@ Reference: CryEngine Converter v2.0.0 release notes and source at
 - ❄️ Full `PhysicsData` payload decode (PrimitiveType 0/1/5/6 + the
   `PhysicsDataType{0,1,2}` / `PhysicsStruct{1,2,50}` substructures
   in `Models/PhysicsData.cs` + `Models/Structs/Structs.cs`).
+
+## Phase 8 — Prior art: scorg-tools/Blender-Tools
+
+Reference notes for the Apache-2.0 [scorg-tools/Blender-Tools](https://github.com/scorg-tools/Blender-Tools)
+addon are captured in repo memory at `/memories/repo/scorg-tools-notes.md`
+(module map, useful constants, license posture, comparison vs CryBlend).
+Key finding: scorg-tools delegates **all** binary parsing to the external
+`scdatatools` library and converts geometry via `cgf-converter.exe` → DAE
+→ Blender Collada importer, so its value to us is **workflow patterns**,
+not chunk-level code. The follow-up items below are sequenced by
+user-visible impact.
+
+- ⏳ **P4K streaming reader** — extend `io/pack_fs.py` with a Star
+  Citizen `.p4k` adapter: lazy entry table, ZStd decompression,
+  case-insensitive name cache, multi-part `.dds.N` reassembly.
+- ⏳ **MTL → Blender material wiring** — extend
+  `blender/material_builder.py` to honour scorg's texture-suffix
+  conventions (`_diff/_ddna/_ddn/_spec/_displ/_pom_height`) and
+  branch decals (`_damage/_stencil/_decal`) into a separate
+  modifier/material setup. Optional tint-palette inputs.
+- ⏳ **Companion-file auto-resolution** — new
+  `cryengine_importer/io/asset_resolver.py` that, given a root
+  geometry path, surfaces sibling `.cgam/.chrparams/.skinm/.meshsetup`
+  (and `.mtl`) candidates from the active pack-FS. Mirrors scorg's
+  pre-extract step.
+- ⏳ **Background/threaded import + progress UI** — refactor
+  `blender/addon.py` to run import on a worker thread with a modal
+  progress reporter. Borrow scorg's `concurrent.futures` worker-pool
+  + main-thread task pre-calc pattern (clean reimplementation).
+- ⏳ **CAF → Blender Action for IVO clips** — wire the IVO clip
+  output of `core/cryengine.py` (`_build_clip_from_ivo_caf`) through
+  `blender/action_builder.py`. Phase 4 already does this for classic
+  CAF; this extends the bridge to IVO.
+- ⏳ **Companion `scdatatools` review** — scorg-tools points to
+  `scdatatools` as the actual CryEngine/IVO parsing library. Mine it
+  for chunk layouts, controllers, and compression decoders we may
+  still be missing (separate roadmap item / plan).
+- ❄️ **Loadout / CDF hierarchical assembly with hardpoints** — large
+  scope (Star Citizen blueprint workflow). Deferred until
+  single-file imports, materials, and the P4K layer are solid.
   Intentionally deferred — the C# tree itself never reads these bytes
   and annotates the on-disk layout as unverified.
 
-## Phase 8 — Distribution ⏳
+## Phase 8 — Distribution ✅
 
-- ⏳ Bundle as a Blender extension (`.zip` per `blender_manifest.toml`)
-- ⏳ Submit to extensions.blender.org
+- ✅ Bundle as a Blender extension (`.zip` per `blender_manifest.toml`).
+  `scripts/build_extension.py` zips `cryengine_importer/` as a single
+  top-level subdir (matches Blender's `pkg_zipfile_detect_subdir_or_none`),
+  uses `compresslevel=9` to match `blender --command extension build`,
+  and skips `__pycache__/` + `.pyc`/`.pyo`. Manifest declares
+  `[permissions] files` (importer reads `.cgf`/`.mtl`/`.dds` from disk)
+  and a real maintainer contact. 5 parser tests under
+  `tests/parser/test_build_extension.py` round-trip the built zip and
+  assert the layout Blender's installer requires (single top-level
+  subdir, manifest + `__init__.py` present, no cache artefacts,
+  filename matches manifest version).
+- ⏳ Submit to extensions.blender.org — pending one-shot validation
+  with `blender --command extension validate` on a machine that has
+  Blender 5.0+ on PATH, then upload via
+  <https://extensions.blender.org/submit/>.
 
 ---
 

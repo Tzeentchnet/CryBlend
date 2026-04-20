@@ -10,11 +10,14 @@ to embed material / scene metadata.
 from __future__ import annotations
 
 import io
+import logging
 from xml.etree.ElementTree import Element
 
 from ...enums import ChunkType
 from ...io import cry_xml
 from ..chunk_registry import Chunk, chunk
+
+logger = logging.getLogger(__name__)
 
 
 class ChunkBinaryXmlData(Chunk):
@@ -39,4 +42,9 @@ class ChunkBinaryXmlData3(ChunkBinaryXmlData):
         except Exception:
             # Defensive: an unrecognised payload should not abort the
             # whole file (mirrors the chunk-loader's outer try/except).
+            logger.warning(
+                "failed to decode embedded CryXmlB blob (%d bytes)",
+                len(blob),
+                exc_info=True,
+            )
             self.data = None
