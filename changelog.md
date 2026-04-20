@@ -11,6 +11,30 @@ The upstream C# converter is tracked separately at
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-04-19
+
+### Added
+
+- Companion geometry extensions (`.cgam` / `.cgfm` / `.chrm` /
+  `.skinm`) are now first-class inputs: visible in the File → Import
+  browser filter, accepted by the drag-and-drop FileHandler, and
+  recognised by `CryEngine.supports_file`. Picking a companion
+  directly transparently redirects to the on-disk primary
+  (`.cga` / `.cgf` / `.chr` / `.skin`) when present so material and
+  skinning metadata still load. Fixes silent no-op on
+  `*.cgfm` drops.
+- Bulk-import dedup. New
+  `cryengine_importer/blender/import_dedup.py` with
+  `canonicalize_import_paths()` runs ahead of the per-file import
+  loop in `IMPORT_OT_cryengine.execute`. It collapses exact-path
+  duplicates (case-insensitive on Windows via `os.path.normcase`)
+  and drops any companion geometry file whose primary is **also in
+  the same drop batch** — the primary's importer pulls the companion
+  in automatically. A companion dropped on its own is preserved.
+  Skipped companions are surfaced as an `INFO` operator report. 11
+  new tests in `tests/parser/test_addon_dedup.py`; full suite 296
+  passed.
+
 ### Added
 
 - **Phase 8 / 11 — Headless verification against Blender 5.1.1.** The

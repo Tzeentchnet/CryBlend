@@ -11,7 +11,7 @@ from __future__ import annotations
 bl_info = {
     "name": "CryEngine Importer",
     "author": "Cryengine-Converter contributors",
-    "version": (0, 1, 0),
+    "version": (0, 1, 2),
     "blender": (5, 0, 0),
     "location": "File > Import > CryEngine (.cgf/.chr/.skin)",
     "description": "Import CryEngine model files (.cgf, .cga, .chr, .skin)",
