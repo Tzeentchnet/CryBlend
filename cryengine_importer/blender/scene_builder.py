@@ -35,6 +35,7 @@ from ..models.geometry import MeshGeometry
 from .action_builder import build_actions
 from .armature_builder import attach_skin, build_armature
 from .material_builder import build_material
+from .rigid_body_builder import build_rigid_bodies
 
 if TYPE_CHECKING:
     from ..core.chunks.node import ChunkNode
@@ -82,6 +83,7 @@ def build_scene(
             obj.matrix_world = local
 
     # --- skinning (Phase 3) ------------------------------------------
+    arm_obj: "bpy.types.Object | None" = None
     if cryengine.skinning_info.has_skinning_info:
         arm_obj = build_armature(cryengine, collection=collection)
         if arm_obj is not None:
@@ -92,6 +94,14 @@ def build_scene(
             # --- animation (Phase 4) ---------------------------------
             if cryengine.animation_clips:
                 build_actions(cryengine, arm_obj)
+
+    # --- physics / rigid body collision proxies (Phase 10) ------------
+    build_rigid_bodies(
+        cryengine,
+        armature_obj=arm_obj,
+        node_to_obj=node_to_obj,
+        collection=collection,
+    )
 
     # --- axis conversion (applied last so it covers armature roots
     # produced by attach_skin reparenting). Premultiplies every

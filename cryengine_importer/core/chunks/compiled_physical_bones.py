@@ -3,18 +3,16 @@
 Port of CgfConverter/CryEngineCore/Chunks/ChunkCompiledPhysicalBones*.cs.
 Only 0x800 is implemented (152-byte CompiledPhysicalBone records).
 
-PhysicsGeometry payload bytes are skipped; the importer only needs the
-bone hierarchy.
+PhysicsGeometry payload is decoded into
+``CompiledPhysicalBone.physics_geometry`` for downstream Blender Rigid
+Body collision wiring.
 """
 
 from __future__ import annotations
 
 from ...enums import ChunkType
-from ...models.skinning import CompiledPhysicalBone
+from ...models.skinning import CompiledPhysicalBone, read_bone_physics_geometry
 from ..chunk_registry import Chunk, chunk
-
-
-_PHYSICS_GEOMETRY_BYTES = 104  # matches compiled_bones.py
 
 
 class ChunkCompiledPhysicalBones(Chunk):
@@ -46,7 +44,7 @@ class ChunkCompiledPhysicalBones800(ChunkCompiledPhysicalBones):
             bone.num_children = br.read_u32()
             bone.controller_id = br.read_u32()
             br.skip(32)  # prop char[32]
-            br.skip(_PHYSICS_GEOMETRY_BYTES)  # PhysicsGeometry
+            bone.physics_geometry = read_bone_physics_geometry(br)
             self.physical_bone_list.append(bone)
 
         # Resolve parent_id / child_ids by ControllerID.

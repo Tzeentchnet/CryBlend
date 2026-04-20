@@ -41,8 +41,9 @@ python scripts/build_extension.py
   `#caf` animation blocks and `#dba` libraries
 - **Materials** — `.mtl` in plain XML, CryXmlB, and pbxml encodings,
   with DDS texture lookup (diffuse / normal / spec / gloss)
-- **Pack-file backends** — real filesystem, in-memory, and cascaded
-  search paths; `.p4k` streaming is planned (see Known issues)
+- **Pack-file backends** — real filesystem, in-memory, ZIP-archive
+  (vanilla CryEngine `.pak`), and cascaded search paths; Star Citizen
+  `.p4k` streaming is planned (see Known issues)
 
 ### Capabilities produced in Blender
 
@@ -50,16 +51,72 @@ python scripts/build_extension.py
   subset-based material slots (Principled BSDF + image texture nodes)
 - Armatures with rest pose, vertex groups, and Armature modifiers for
   `.chr` / `.skin` / IVO skinned meshes
-- Blender Actions with fcurves on the armature for classic CryEngine
-  `.caf` animation (IVO CAF → Action bridge is pending — see Known
-  issues)
+- Blender Actions with fcurves on the armature for both classic
+  CryEngine `.caf` animation and Star Citizen IVO `#caf` / `#dba`
+  clips
 - Shape keys (Basis + one per morph target) for
   `CompiledMorphTargets` chunks
 - Helper empties with per-`HelperType` display styles (POINT / DUMMY /
   GEOMETRY / XREF / CAMERA)
+- Rigid Body collision proxies from `BonePhysicsGeometry` AABBs
+  (one BOX Empty per bone, parented under the matching armature
+  bone) and from `MeshPhysicsData_800` cube / cylinder primitives
+  (BOX/CYLINDER markers parented under the owning mesh). Passive
+  Rigid Body Collision is attached automatically when the scene
+  already has a Rigid Body World.
 - Chunk-format coverage up to CryEngine Converter v2.0.0, including
   SC 4.5+ chunk-type IDs and ArcheAge controller variants
   (`Controller_827/828/830/831`)
+
+## Post-import sidebar panel
+
+Every imported asset gets stamped with metadata on its Blender
+Collection so a dedicated **CryBlend** tab in the 3D Viewport
+sidebar (press `N`) can offer post-import inspection and tweaks
+without going back through File → Import.
+
+The panel is context-sensitive: it activates whenever the active
+collection (or one of its ancestors) was produced by a CryBlend
+import. It contains six sub-panels:
+
+- **General** — source path, axis settings, and a one-click
+  **Re-import** that re-runs the importer with the cached settings
+  (useful after fixing missing `.cgam` companions or pointing at a
+  different object directory).
+- **Materials** — per-library *resolved / missing* status, plus:
+  - **Set Object Directory…** — pick the game's data root; CryBlend
+    re-runs material-library resolution and swaps any placeholder
+    `<mesh>_mat<N>` slots in place.
+  - **Retry Placeholder Materials** — sweep the collection and retry
+    resolution against the current libraries.
+  - **Replace Active Slot from `.mtl`…** — point at any `.mtl` to
+    replace the active object's active material slot.
+- **Tints** — for the active material, lists every `Tint_*`
+  `ShaderNodeRGB` node (created from the `<PublicParams>` colours of
+  the source `.mtl`, e.g. SC `LayerBlend` `DiffuseTint1`,
+  `DirtColor`). Primary tints (multiplied into Base Color) group
+  separately from secondary (wear / dirt) tints. Each row is a live
+  colour picker; **Save Preset…** / **Load Preset…** round-trip a
+  JSON sidecar (`<material>.tint.json`); **Reset to .mtl Values**
+  restores the originals from the cached PublicParams.
+- **Textures** — live audit of broken image references with a
+  per-image expander. **Relink From Directory…** walks a folder and
+  reassigns image filepaths by lowercase basename; **Export Missing
+  List…** writes a tab-separated `<material>\t<image>\t<filepath>`
+  `.txt` for offline `.pak` extraction.
+- **Physics & Helpers** — count of Phase-10 collision proxies,
+  visibility toggle, **Add Rigid Body World** one-click (so the
+  passive collision shapes activate), and a bulk helper-display
+  switcher (PLAIN_AXES / ARROWS / CONE / CUBE / SPHERE) with size
+  control for selected empties.
+- **Animation** *(only when the collection has an armature)* —
+  list every action, **Set Active** / **Push to NLA** per row,
+  and **Import Extra Clip…** for adding a `.caf` / `.anim` / `.cal`
+  to an already-imported armature.
+
+The metadata payload (`collection["cryblend"]`) is plain JSON-safe
+data so it survives Save/Reopen of the `.blend`. The schema is
+versioned (`schema=1`) for future migrations.
 
 ## Building the extension `.zip`
 
@@ -88,15 +145,14 @@ blender --background --python tests/headless_smoke.py
 ## Known issues / limitations
 
 - **Star Citizen `.p4k` streaming is not implemented yet.** Extract
-  assets to disk first and point the importer at the extracted tree.
-- **IVO animation → Blender Action bridge is pending.** `#caf` and
-  `#dba` blocks parse into `AnimationClip`s but are not yet wired
-  through `blender/action_builder.py` the way classic `.caf` is.
+  assets to disk first, or repackage as a vanilla ZIP and use
+  `ZipFileSystem`.
 - **`CompiledPhysicalBonesIvo`** (chunk types `0x90C687DC` and
   `0x90C66666`) are not wired — no test fixture has surfaced.
-- **`PhysicsData` payload is skipped.** `MeshPhysicsData_800` is a
-  registered no-op; wire physics via Blender's own Rigid Body /
-  Collision modifiers.
+- **Polyhedron physics primitives (`PrimitiveType 1`) are not
+  decoded.** Cube / cylinder / unknown-6 are decoded and surfaced as
+  collision proxies; the polyhedron schema is too under-specified in
+  pyffi's `cgf.xml` to ship without a real fixture.
 - **`ChunkIvoSkinMesh_900` 8-byte tangent-frame smallest-three decode
   is intentionally skipped** — Blender derives tangents from UVs.
 - **No loadout / CDF hierarchical assembly with hardpoints.** Import
@@ -105,8 +161,9 @@ blender --background --python tests/headless_smoke.py
   name tables are not decoded (upstream C# reader also stubs these).
 - **Not in scope:** Wii-U Stream pack filesystem, big-endian Rise of
   Lyric files, and terrain export.
-- **Not yet published to extensions.blender.org.** Submission is
-  pending a one-shot `blender --command extension validate` run.
+- **Not yet published to extensions.blender.org.** The built zip
+  passes `blender --command extension validate`; submission via
+  <https://extensions.blender.org/submit/> is pending.
 
 ## Attributions
 

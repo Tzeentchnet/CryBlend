@@ -13,6 +13,277 @@ The upstream C# converter is tracked separately at
 
 ### Added
 
+- **Phase 8 / 11 — Headless verification against Blender 5.1.1.** The
+  built `dist/cryengine_importer-0.1.0.zip` extension now passes
+  `blender --command extension validate` cleanly (manifest fix:
+  shortened `[permissions] files` to fit the 64-char limit and
+  stripped the trailing period — Blender rejects permission strings
+  ending in punctuation). `tests/headless_smoke.py` extended to
+  assert the Phase 11 metadata stamp (`schema`, `source_path`,
+  `material_libs` / `_resolved` counts, `axis_forward` / `axis_up`)
+  and verify all sub-panel classes (`VIEW3D_PT_cryblend`,
+  `_materials`, `_tints`) registered. Verified end-to-end against
+  the `ARGO_ATLS_SeatAccess.cgf` IVO fixture: 5 nodes / 6 objects,
+  exit 0.
+
+- **Phase 11 — Post-import "CryBlend" sidebar panel.** Adds a new
+  N-panel tab in the 3D Viewport with six sub-panels (General /
+  Materials / Tints / Textures / Physics & Helpers / Animation) that
+  let artists tweak imports without going back through File → Import.
+
+  *Metadata layer.* New `cryengine_importer/blender/asset_metadata.py`
+  stamps each imported Collection with a JSON-safe
+  `["cryblend"]` payload (schema-versioned at `1`): `source_path`,
+  `object_dir`, `material_libs`, `material_libs_resolved`,
+  `axis_forward`, `axis_up`, `convert_axes`, `import_related`,
+  `addon_version`, plus a `public_params_by_material` cache used by
+  the tint reset operator. `IMPORT_OT_cryengine._import_one` writes
+  the stamp after `build_scene`. Lookup helpers
+  (`find_cryblend_collections` / `find_active_cryblend_collection`)
+  walk `context.collection` → ancestors → active object's collection
+  → first stamped, all duck-typed for unit-testability without `bpy`.
+
+  *Materials.* Lists material libraries with a per-row
+  resolved/missing icon. `CRYBLEND_OT_set_object_dir` re-runs
+  `load_material_libraries` against a chosen object directory and
+  swaps placeholder `<obj>_mat<N>` slots in place via
+  `mesh.materials[idx] = build_material(...)`. Companions:
+  `CRYBLEND_OT_replace_placeholders` (sweep current libs),
+  `CRYBLEND_OT_reload_material_from_mtl` (replace active slot from a
+  user-picked `.mtl`).
+
+  *Tints.* Lists the `Tint_*` `ShaderNodeRGB` nodes Phase-9 wired
+  into materials with PublicParams; each row binds to the node's
+  `default_value` for live colour editing. Primary tints (multiplied
+  into Base Color) group separately from secondary (wear / dirt) ones.
+  `CRYBLEND_OT_save_tint_preset` / `CRYBLEND_OT_load_tint_preset`
+  round-trip a JSON sidecar via new pure-Python
+  `cryengine_importer/materials/tint_presets.py` (`save_preset` /
+  `load_preset` / `default_preset_path` / `TintPresetError`, with
+  schema versioning + tolerant ingestion of legacy loose-form JSON).
+  `CRYBLEND_OT_reset_tints_from_mtl` restores tints from the cached
+  PublicParams stamped on the collection metadata.
+
+  *Textures.* Live audit of broken image references via new
+  `cryengine_importer/blender/texture_audit.py`
+  (`MissingImage` dataclass, `find_missing_images` with injectable
+  `abspath`/`exists` for tests, `index_directory` lowercase-basename
+  map, `plan_relinks`, `write_missing_files_report`). Skips packed,
+  loaded, and placeholder images. `CRYBLEND_OT_relink_textures` walks
+  a directory, reassigns `image.filepath` by lowercase basename, and
+  calls `image.reload()`. `CRYBLEND_OT_export_missing_files` writes
+  a tab-separated `<material>\t<image>\t<filepath>` `.txt` for
+  offline `.pak` extraction.
+
+  *Physics & Helpers.* Counts collision Empties produced by the
+  Phase-10 `rigid_body_builder` (heuristic: name contains
+  `_collision` or starts with `physics_`). One-click "Add Rigid Body
+  World" wraps `bpy.ops.rigidbody.world_add`. Bulk helper-display
+  switcher (`PLAIN_AXES` / `ARROWS` / `CONE` / `CUBE` / `SPHERE`)
+  applies to selected empties via a new `CryBlendPanelProps` scene
+  PropertyGroup.
+
+  *Animation.* Shows only when the active CryBlend collection
+  contains an armature; lists actions with per-row "Set Active"
+  (`CRYBLEND_OT_set_active_action`) and "Push to NLA"
+  (`CRYBLEND_OT_push_action_to_nla`) operators.
+  `CRYBLEND_OT_import_extra_clip` stages a `.caf` / `.anim` / `.cal`
+  next to the source asset, re-runs `CryEngine.process()`, then
+  `build_actions` against the existing armature.
+
+  *Re-import.* `CRYBLEND_OT_reimport` reads the metadata, deletes
+  the current objects + collection, and re-invokes
+  `bpy.ops.import_scene.cryengine` with the same axes / object_dir /
+  import_related so artists can iterate after fixing missing
+  companions.
+
+  30 new pure-Python tests across
+  `tests/parser/test_asset_metadata.py` (11),
+  `tests/parser/test_tint_presets.py` (8), and
+  `tests/parser/test_texture_audit.py` (11). All exercises avoid
+  `bpy` via duck-typed fakes. Full suite: 285 passed.
+
+- **Phase 9 — MTL tint-palette inputs.** New helpers on
+  `cryengine_importer.materials.material`: `parse_color_value` /
+  `parse_scalar_value` (single-value parsers),
+  `extract_color_params` / `extract_scalar_params` (partition a
+  `PublicParams` dict by value shape), `extract_tint_colors` (sugar
+  over a `Material`'s public params), and `is_primary_tint_key`
+  (classifies `DiffuseTint` / `DiffuseTint1` … as multiplicative
+  primary tints; excludes `*Wear*` blend layers and overlay colours
+  like `DirtColor` / `DustColor`). The Blender bridge in
+  `blender/material_builder.py` now surfaces every RGB-valued
+  PublicParam as a labelled `ShaderNodeRGB` node so artists can
+  re-tint imported assets without editing the `.mtl`; primary tints
+  are additionally chained through MixRGB(MULTIPLY) nodes inserted
+  between the diffuse texture (or BSDF default) and the Principled
+  BSDF Base Color input. Verified against the verbatim
+  `Anodized_01_A` PublicParams from `tests/fixtures/SC_mat.mtl`
+  (`DirtColor`, `DiffuseTint1`, `DiffuseTintWear1`, plus 7 scalar
+  params). 12 new tests in `tests/parser/test_materials.py`.
+
+- **Phase 10 — Blender Rigid Body bridge.** New
+  `cryengine_importer/blender/rigid_body_builder.py` turns the
+  per-bone `BonePhysicsGeometry` AABBs (decoded earlier in Phase 10)
+  and the standalone `MeshPhysicsData_800` cube / cylinder primitives
+  into Blender collision proxies. Pure-Python
+  `plan_bone_collision_shapes(skinning_info, *, include_dead=False)`
+  emits one BOX `CollisionShape` per bone with a non-empty alive
+  AABB (skipping `is_empty` records and degenerate point-sized
+  extents); `plan_mesh_physics_shapes(physics_chunks)` emits one
+  BOX/CYLINDER per cube / cylinder / unknown-6 payload (polyhedron
+  is skipped, matching the parser's `polyhedron_skipped=True` flag).
+  bpy-side `apply_collision_shapes` materialises BOX shapes as
+  Empties (`empty_display_type='CUBE'`) parented under the matching
+  armature bone via `parent_type='BONE'`; CYLINDER shapes become a
+  small wireframe cylinder mesh (Empties have no cylinder display
+  type). Passive Rigid Body Collision is attached automatically when
+  the scene already has a Rigid Body World — adding a world from
+  inside the importer is intrusive, so we leave that to the user.
+  `scene_builder.build_scene` now calls `build_rigid_bodies` after
+  the armature + animation passes. 13 new tests in
+  `tests/parser/test_rigid_body_builder.py` cover the planner
+  contract: empty skinning, no-physics bones, empty AABB, degenerate
+  extent, alive-only emit, `include_dead` extra emit, offset-AABB
+  centre derivation, no-payload mesh chunks, polyhedron skip, cube /
+  cylinder / unknown-6 emit, custom `name_prefix`, and unknown raw
+  primitive types.
+
+- **Phase 10 — `MeshPhysicsData_800` payload decode (pyffi spec).** The
+  chunk's 24-byte header (`physics_data_size` / `flags` /
+  `tetrahedra_data_size` / `tetrahedra_id` / 2× reserved) plus the
+  optional `PhysicsData` payload are now fully decoded. Authoritative
+  on-disk layout came from **PyFFI's** `cgf.xml` schema
+  (<https://github.com/niftools/pyffi> → `pyffi/formats/cgf/cgf.xml`,
+  structs `MeshPhysicsDataChunk`, `PhysicsData`, `PhysicsCube`,
+  `PhysicsCylinder`, `PhysicsShape6`) — the upstream C#
+  `ChunkMeshPhysicsData_800.Read` is a TODO stub and
+  `Models/PhysicsData.cs` only declares the record fields without
+  reading them. New `cryengine_importer.models.physics` module ports
+  the schema: `PhysicsData` 60-byte prefix (inertia / quat rotation /
+  center / mass / primitive type) plus the `PhysicsCube` (132 bytes,
+  2× `PhysicsStruct1` + int) and `PhysicsCylinder` / `PhysicsShape6`
+  (104 bytes, identical layouts per pyffi: `float[8]` + int +
+  `PhysicsDataType2`) primitive shapes. Trailing `tetrahedra_data` is
+  read as raw bytes (capped by the chunk's declared size to survive
+  corrupt headers). `PrimitiveType.POLYHEDRON` (1) is intentionally
+  not decoded — pyffi's schema is variable-size with multiple
+  `Unknown` / `Junk?` / `not sure` annotations and `PhysicsDataType{0,1}`
+  substructs whose `Num Data 1` field is documented as "usually
+  0xffffffff" without a firm rule. The reader records the type and
+  flags `polyhedron_skipped = True`; the chunk-table walker advances
+  past unread bytes via the chunk header's `size`. 12 tests in
+  `tests/parser/test_physics.py` cover registration, empty / undersized
+  chunks, header-only, tetrahedra payload, the truncation cap, the
+  cube / cylinder / unknown-6 payloads end-to-end through the chunk
+  reader, the standalone `read_physics_cube` / `read_physics_cylinder`
+  / `read_physics_data` helpers, and the polyhedron skip path.
+
+- **Phase 9 — pack-file inspection CLI.** New
+  `cryengine_importer.pak_browser` module (runnable via
+  `python -m cryengine_importer.pak_browser`). Auto-detects directory
+  vs. ZIP-archive sources (`RealFileSystem` vs. `ZipFileSystem`) and
+  exposes two subcommands: `list` enumerates primary geometry files
+  (delegates to `find_geometry_files`, so
+  `.cgam`/`.chrm`/`.skinm`/`.cgfm` companions are filtered out
+  automatically), and `companions` prints the resolved sibling files
+  (geometry companion + chrparams / cal / mtl / meshsetup / cdf) for
+  a specific geometry path. Pure Python; the same module powers both
+  stdout output and a future Blender "Browse Pack" UI panel. 8 new
+  tests in `tests/parser/test_pak_browser.py` cover both subcommands
+  against ZIP archives and `RealFileSystem` directories,
+  missing-source errors, the no-companions-found non-zero exit code,
+  and the argparse subcommand requirement.
+
+### Changed
+
+- **Phase 0 cleanup.** `blender_manifest.toml` was already shipping
+  for Blender 5.0+ but the roadmap entry still showed ⏳ (4.2+).
+  Promoted to ✅ to reflect reality.
+
+- **Phase 10 — `BonePhysicsGeometry` decode.** The per-bone 104-byte
+  `PhysicsGeometry` payload (previously `skip()`ped) is now fully
+  decoded by `models.skinning.read_bone_physics_geometry` into a new
+  `BonePhysicsGeometry` dataclass. Both `ChunkCompiledBones_800` /
+  `_801` (alive + dead LODs → `CompiledBone.physics_alive` /
+  `physics_dead`) and `ChunkCompiledPhysicalBones_800`
+  (`CompiledPhysicalBone.physics_geometry`) consume the new helper.
+  The dataclass carries `physics_geom` id, flags, AABB `min`/`max`
+  (with derived `center` / `extent` properties), spring angle/tension,
+  damping, and the 3x3 frame matrix — foundation for a future Blender
+  Rigid Body bridge that turns each bone's AABB into a BOX collision
+  shape parented under the armature without leaving the addon.
+  4 new tests in `tests/parser/test_skinning.py` cover the standalone
+  decoder, empty-record detection, and integration with both
+  `CompiledBones_800` and `CompiledPhysicalBones_800` readers
+  (verifying alive vs. dead LOD population and AABB
+  `center`/`extent` derivation).
+- **Phase 9 — IVO CAF → Blender Action wiring confirmed.** The IVO
+  `.caf` / `.dba` clip output of `core/cryengine.py`
+  (`_build_clip_from_ivo_caf` / `_ivo_caf_to_clip` /
+  `_build_clips_from_ivo_dba`) already flows into the same
+  `animation_clips` list that `blender/action_builder.build_actions`
+  iterates — so SC `.caf` / `.dba` companion files alongside an IVO
+  geometry produce Blender Actions on the armature without further
+  wiring. Roadmap entry promoted from ⏳ to ✅.
+
+- **Phase 9 — companion-file auto-resolution.** New
+  `cryengine_importer.io.asset_resolver` module. `resolve_companions`
+  takes a geometry path + pack-FS and returns an `AssetCompanions`
+  dataclass with the geometry companion (`.cgam` / `.chrm` /
+  `.skinm` / `.cgfm`) plus the standard metadata sidecars
+  (`.chrparams`, `.cal`, `.mtl`, `.meshsetup`, `.cdf`). All extensions
+  are stock CryEngine — works for MWO / Aion / ArcheAge / Crysis /
+  Star Citizen alike. `extra_exts` lets callers probe additional
+  same-stem extensions (e.g. `(".lod0",)`) without modifying the
+  module. `core/cryengine.py`'s `_auto_detect_companion` now
+  delegates here, so the same logic is reusable from a future
+  "browse pack file" UI in the addon. A companion
+  `find_geometry_files(pack_fs, pattern)` helper enumerates primary
+  geometry files while excluding the
+  `.cgam`/`.chrm`/`.skinm`/`.cgfm` duplicates. 12 new tests in
+  `tests/parser/test_asset_resolver.py` cover full-set discovery,
+  partial sets, ZIP-archive lookups, case-insensitive `RealFileSystem`
+  resolution, custom extras (with and without leading dot), and
+  companion-dedup in `find_geometry_files`.
+
+- **Phase 10 — `ZipFileSystem` pack-FS backend.** New
+  `cryengine_importer.io.pack_fs.ZipFileSystem` reads vanilla
+  CryEngine ZIP-format `.pak` archives directly via the stdlib
+  `zipfile` module. Lookups are case-insensitive (CryEngine
+  convention) via a lower-case → real-name index built at construction
+  time, so `exists` / `open` / `read_all_bytes` are O(1). `open`
+  returns an in-memory `BytesIO` so the chunk readers' `seek` / `tell`
+  reliance keeps working. Slots in alongside `RealFileSystem` /
+  `InMemoryFileSystem` / `CascadedPackFileSystem` behind the same
+  interface — non-SC users (MWO / Aion / ArcheAge / Crysis) can now
+  point CryBlend straight at game `.pak` files instead of extracting
+  by hand. 6 new tests in `tests/parser/test_pack_fs.py` cover
+  case-insensitive lookup, `open`-returns-seekable, glob, missing-file
+  errors, ignored directory entries, and use inside a cascade.
+- **Phase 9 — MTL texture-suffix conventions.**
+  `cryengine_importer.materials.material.classify_texture_suffix`
+  recognises the standard CryEngine artist suffixes
+  (`_diff` / `_ddna` / `_ddn` / `_spec` / `_displ` / `_disp` /
+  `_pom_height` / `_decal` / `_damage` / `_stencil` / `_em` / `_ao`)
+  on the texture filename and overrides the `<Texture Map="...">`
+  attribute. This is a vanilla Crytek convention used across every
+  CryEngine title, not SC-specific. `Texture.slot` now consults the
+  suffix table first because Crytek artists frequently leave
+  `Map="Diffuse"` even on packed normal/gloss maps. The Blender
+  bridge (`blender/material_builder.py`) wires the new slots:
+  `normals_gloss` (DDNA — RGB normal + alpha gloss) splits into a
+  Normal Map node *and* an Invert → Roughness path so DXT5nm
+  packed textures unpack correctly; `height` (`_displ` / `_disp` /
+  `_pom_height`) feeds a Displacement node into the Output's
+  Displacement input; branch decals (`_damage` / `_stencil` /
+  `_decal`) land on a labelled, unconnected Image node so artists
+  can wire them into a second material slot or layered shader
+  without losing the reference. 16 new tests in
+  `tests/parser/test_materials.py` cover the suffix classifier,
+  longest-match priority (`_pom_height` over `_disp`,
+  `_displ` over `_disp`), and the suffix-beats-`Map=` behaviour.
+
 - **Phase 8 — distribution.** `scripts/build_extension.py` is now
   submission-ready: bumped to `compresslevel=9` (matches
   `blender --command extension build`), still skips `__pycache__/` and

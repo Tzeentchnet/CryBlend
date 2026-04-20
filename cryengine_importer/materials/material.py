@@ -83,6 +83,69 @@ _MAP_TO_SLOT: dict[str, str] = {
 }
 
 
+# Texture-filename suffix conventions used across stock CryEngine titles
+# (MWO, Aion, ArcheAge, Crysis, Star Citizen, modded Crysis assets).
+# A texture file's *basename* (without extension) ending in one of
+# these suffixes is treated as that channel, regardless of what the
+# ``<Texture Map="...">`` attribute says — Crytek artists often leave
+# ``Map="Diffuse"`` even on packed normal/gloss maps.
+#
+# Order matters: `_pom_height` and `_displ` must be checked before the
+# generic `_disp` / `_height` fallbacks. Longest match wins.
+_SUFFIX_TO_SLOT: tuple[tuple[str, str], ...] = (
+    # Packed normal + gloss (DXT5nm-style): RGB normal, A channel = gloss.
+    ("_ddna", "normals_gloss"),
+    # Plain normal map (no gloss in alpha).
+    ("_ddn", "normals"),
+    # Diffuse / albedo.
+    ("_diff", "diffuse"),
+    # Specular reflectivity map.
+    ("_spec", "specular"),
+    # Parallax-occlusion height map (used as displacement input).
+    ("_pom_height", "height"),
+    # Displacement / height (two spellings in the wild).
+    ("_displ", "height"),
+    ("_disp", "height"),
+    # Branch-decal class — damage / stencil overlays. Routed to a
+    # separate "decal" slot rather than overwriting Base Color, so
+    # the Blender bridge can wire them as a second material slot or
+    # leave them unconnected with a label.
+    ("_damage", "decal"),
+    ("_stencil", "decal"),
+    ("_decal", "decal"),
+    # Glow / emissive.
+    ("_em", "emittance"),
+    # Ambient occlusion.
+    ("_ao", "occlusion"),
+)
+
+
+def classify_texture_suffix(file_path: str) -> str | None:
+    """Return the normalized slot name for a CryEngine texture filename.
+
+    Looks at the basename (without extension), case-insensitively, and
+    returns the first matching entry in :data:`_SUFFIX_TO_SLOT`. Returns
+    ``None`` when no convention matches — callers should then fall back
+    to the ``<Texture Map="...">`` attribute via
+    :data:`_MAP_TO_SLOT`.
+
+    The special slot ``"normals_gloss"`` indicates a DDNA-style packed
+    map (RGB normal + A gloss); the Blender bridge wires both Normal
+    and Roughness from a single image.
+    """
+    if not file_path:
+        return None
+    # Strip directory + extension; keep just the base name.
+    name = file_path.replace("\\", "/").rsplit("/", 1)[-1]
+    if "." in name:
+        name = name.rsplit(".", 1)[0]
+    name = name.lower()
+    for suffix, slot in _SUFFIX_TO_SLOT:
+        if name.endswith(suffix):
+            return slot
+    return None
+
+
 @dataclass
 class Texture:
     """A single ``<Texture Map="..." File="...">`` entry."""
@@ -95,9 +158,17 @@ class Texture:
     def slot(self) -> str:
         """Normalized slot name (``diffuse`` / ``normals`` / ...).
 
-        Returns the raw map string (lower-cased) when not in the
-        known table, so unknown maps are still routed somewhere.
+        File-suffix conventions (``_ddna`` / ``_ddn`` / ``_diff`` /
+        ``_spec`` / ``_displ`` / ``_pom_height`` / ``_disp`` /
+        ``_decal`` / ``_damage`` / ``_stencil`` / ``_em`` / ``_ao``)
+        win over the raw ``Map`` attribute, because Crytek artists
+        frequently leave ``Map="Diffuse"`` even on packed normal/gloss
+        maps. Falls back to the ``Map`` table, then to a lower-cased
+        version of the raw map string for unknown values.
         """
+        suffix_slot = classify_texture_suffix(self.file)
+        if suffix_slot is not None:
+            return suffix_slot
         return _MAP_TO_SLOT.get(self.map, self.map.lower())
 
     @classmethod
@@ -120,6 +191,107 @@ def _parse_color(s: str | None) -> tuple[float, float, float] | None:
         return (float(parts[0]), float(parts[1]), float(parts[2]))
     except ValueError:
         return None
+
+
+# ---- PublicParams (tint palette) helpers ----------------------------
+#
+# CryEngine `<PublicParams ...>` carries shader-specific scalar / colour
+# inputs as XML attributes; values are either single floats
+# (``"0.55536944"``) or comma-separated 3-floats for RGB
+# (``"0.04518621,0.04518621,0.04518621"``). Star Citizen's
+# `LayerBlend` shader uses these for tint-palette colours
+# (``DiffuseTint1``, ``DirtColor`` etc.) — exposing them as Blender
+# RGB inputs lets artists re-tint imported assets without round-tripping
+# through `.mtl`.
+
+
+def parse_color_value(value: str) -> tuple[float, float, float] | None:
+    """Parse a CryEngine PublicParams colour string.
+
+    Returns the RGB triple or ``None`` when the string isn't 3
+    comma-separated floats. Strict — anything that fails to parse is
+    silently skipped at the caller.
+    """
+    return _parse_color(value)
+
+
+def parse_scalar_value(value: str) -> float | None:
+    """Parse a single-float PublicParams value, or ``None``."""
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def extract_color_params(
+    public_params: dict[str, str],
+) -> dict[str, tuple[float, float, float]]:
+    """Subset of ``public_params`` whose values parse as RGB triples.
+
+    Insertion order is preserved so the Blender bridge can lay out
+    nodes deterministically.
+    """
+    out: dict[str, tuple[float, float, float]] = {}
+    for k, v in public_params.items():
+        rgb = parse_color_value(v)
+        if rgb is not None:
+            out[k] = rgb
+    return out
+
+
+def extract_scalar_params(public_params: dict[str, str]) -> dict[str, float]:
+    """Subset of ``public_params`` whose values parse as single floats."""
+    out: dict[str, float] = {}
+    for k, v in public_params.items():
+        # Skip values that look like a colour triple — those are caught
+        # by :func:`extract_color_params`.
+        if "," in v:
+            continue
+        f = parse_scalar_value(v)
+        if f is not None:
+            out[k] = f
+    return out
+
+
+def is_primary_tint_key(key: str) -> bool:
+    """True when ``key`` is a *primary* diffuse tint slot.
+
+    Convention (Star Citizen ``LayerBlend`` and friends):
+
+    * ``DiffuseTint``, ``DiffuseTint1``, ``DiffuseTint2`` ... — primary
+      tint colours that *multiply* the base diffuse.
+    * ``DiffuseTintWear*`` — wear-layer tints; *blend* into a separate
+      layer, not multiplied with the base. Excluded.
+    * ``DirtColor``, ``DustColor``, ``GrimeColor`` etc. — overlay /
+      decal colours. Excluded.
+
+    Excluded tints are still surfaced as labelled RGB nodes by the
+    Blender bridge — they're just not wired into Base Color.
+    """
+    if not key:
+        return False
+    k = key.lower()
+    if "wear" in k:
+        return False
+    # ``DiffuseTint`` optionally followed by digits.
+    if k == "diffusetint":
+        return True
+    if k.startswith("diffusetint") and k[len("diffusetint"):].isdigit():
+        return True
+    return False
+
+
+def extract_tint_colors(
+    material: "Material",
+) -> dict[str, tuple[float, float, float]]:
+    """All RGB-valued PublicParams on ``material``.
+
+    Sugar over ``extract_color_params(material.public_params)`` so
+    callers don't have to reach through the field name.
+    """
+    return extract_color_params(material.public_params)
 
 
 def _parse_gen_mask(string_gen_mask: str | None) -> set[str]:
@@ -273,4 +445,11 @@ __all__ = [
     "Material",
     "MaterialFlags",
     "Texture",
+    "classify_texture_suffix",
+    "extract_color_params",
+    "extract_scalar_params",
+    "extract_tint_colors",
+    "is_primary_tint_key",
+    "parse_color_value",
+    "parse_scalar_value",
 ]

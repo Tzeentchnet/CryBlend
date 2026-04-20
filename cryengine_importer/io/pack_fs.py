@@ -7,8 +7,10 @@ can be backed by the real filesystem, by stacked search paths
 
 from __future__ import annotations
 
+import fnmatch
 import io
 import os
+import zipfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import BinaryIO, Iterable
@@ -166,3 +168,77 @@ class InMemoryFileSystem(IPackFileSystem):
             n = _normalize(pattern)
             if n in self._files:
                 yield n
+
+
+class ZipFileSystem(IPackFileSystem):
+    """Backed by a ZIP archive (vanilla CryEngine ``.pak`` / ``.zip``).
+
+    MWO / Aion / ArcheAge / Crysis ship their game data as ZIP-format
+    ``.pak`` files. ``zipfile`` from the stdlib covers them; no extra
+    deps. The C# tree exposes the same backend via
+    ``CgfConverter/PackFileSystem`` ZIP support.
+
+    Lookups are case-insensitive (CryEngine convention). Internally we
+    build a single lower-case → real-name map at construction time, so
+    ``exists`` / ``open`` / ``read_all_bytes`` are O(1).
+    """
+
+    def __init__(self, archive: str | os.PathLike[str] | zipfile.ZipFile) -> None:
+        if isinstance(archive, zipfile.ZipFile):
+            self._zip = archive
+            self._owns_zip = False
+            self._source: Path | None = None
+        else:
+            self._source = Path(archive).resolve()
+            self._zip = zipfile.ZipFile(self._source, "r")
+            self._owns_zip = True
+
+        # Build a lower-case lookup. Skip directory entries (trailing '/').
+        self._index: dict[str, str] = {}
+        for name in self._zip.namelist():
+            if name.endswith("/"):
+                continue
+            self._index[_normalize(name).lower()] = name
+
+    @property
+    def source(self) -> Path | None:
+        return self._source
+
+    def close(self) -> None:
+        if self._owns_zip:
+            self._zip.close()
+
+    def __enter__(self) -> "ZipFileSystem":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def _resolve(self, path: str) -> str | None:
+        return self._index.get(_normalize(path).lower())
+
+    def exists(self, path: str) -> bool:
+        return self._resolve(path) is not None
+
+    def open(self, path: str) -> BinaryIO:
+        real = self._resolve(path)
+        if real is None:
+            raise FileNotFoundError(path)
+        # ``ZipFile.open`` returns a non-seekable stream; chunk readers
+        # in ``io.binary_reader`` rely on ``seek``/``tell``, so wrap in
+        # an in-memory buffer.
+        return io.BytesIO(self._zip.read(real))
+
+    def read_all_bytes(self, path: str) -> bytes:
+        real = self._resolve(path)
+        if real is None:
+            raise FileNotFoundError(path)
+        return self._zip.read(real)
+
+    def glob(self, pattern: str) -> Iterable[str]:
+        # Match against the *original* (zip-stored) names but apply the
+        # pattern in a case-insensitive, forward-slash form.
+        norm_pattern = _normalize(pattern).lower()
+        for key, real in self._index.items():
+            if fnmatch.fnmatchcase(key, norm_pattern):
+                yield real

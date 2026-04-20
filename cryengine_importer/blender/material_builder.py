@@ -38,10 +38,13 @@ _SLOT_PROFILE: dict[str, tuple[str, bool]] = {
     # slot: (principled_input, is_data_texture)
     "diffuse": ("Base Color", False),
     "normals": ("Normal", True),
+    "normals_gloss": ("Normal", True),  # DDNA: RGB normal + A gloss
     "specular": ("Specular IOR Level", True),
     "opacity": ("Alpha", True),
     "emittance": ("Emission Color", False),
     "occlusion": ("", True),  # not wired yet
+    "height": ("", True),     # wired to Output's Displacement input
+    "decal": ("", False),     # branch decal: dropped onto a labelled, unconnected node
 }
 
 
@@ -90,6 +93,7 @@ def build_material(
 
     # Place texture nodes vertically to the left of the BSDF.
     y = 300
+    diffuse_tex_node: "bpy.types.Node | None" = None
     for tex in material.textures:
         node = _add_texture_node(
             nt, tex, pack_fs=pack_fs, image_search_root=image_search_root, y=y
@@ -97,7 +101,11 @@ def build_material(
         y -= 280
         if node is None:
             continue
-        _wire_texture(nt, node, tex.slot, bsdf)
+        _wire_texture(nt, node, tex.slot, bsdf, output)
+        if tex.slot == "diffuse" and diffuse_tex_node is None:
+            diffuse_tex_node = node
+
+    _wire_tint_palette(nt, material, bsdf, diffuse_tex_node, y=y)
 
     return mat
 
@@ -140,13 +148,24 @@ def _wire_texture(
     tex_node: "bpy.types.Node",
     slot: str,
     bsdf: "bpy.types.Node",
+    output: "bpy.types.Node",
 ) -> None:
     profile = _SLOT_PROFILE.get(slot)
-    if profile is None or not profile[0]:
+    if profile is None:
         return
 
-    socket_name = profile[0]
-    if socket_name not in bsdf.inputs:
+    # DDNA — packed normal (RGB) + gloss (A). Wire the colour to a
+    # Normal Map node and the alpha to (1 - alpha) → Roughness.
+    if slot == "normals_gloss":
+        nm = nt.nodes.new("ShaderNodeNormalMap")
+        nm.location = (tex_node.location.x + 250, tex_node.location.y)
+        nt.links.new(tex_node.outputs["Color"], nm.inputs["Color"])
+        nt.links.new(nm.outputs["Normal"], bsdf.inputs["Normal"])
+        if "Roughness" in bsdf.inputs:
+            inv = nt.nodes.new("ShaderNodeInvert")
+            inv.location = (tex_node.location.x + 250, tex_node.location.y - 180)
+            nt.links.new(tex_node.outputs["Alpha"], inv.inputs["Color"])
+            nt.links.new(inv.outputs["Color"], bsdf.inputs["Roughness"])
         return
 
     if slot == "normals":
@@ -157,9 +176,107 @@ def _wire_texture(
         nt.links.new(nm.outputs["Normal"], bsdf.inputs["Normal"])
         return
 
+    # Height / displacement — feed the Output node's Displacement input
+    # via a Displacement node (mid-grey neutral, scale defaults to 1).
+    if slot == "height":
+        disp = nt.nodes.new("ShaderNodeDisplacement")
+        disp.location = (tex_node.location.x + 250, tex_node.location.y)
+        nt.links.new(tex_node.outputs["Color"], disp.inputs["Height"])
+        if "Displacement" in output.inputs:
+            nt.links.new(disp.outputs["Displacement"], output.inputs["Displacement"])
+        return
+
+    # Branch decals (damage / stencil / decal) — leave as a labelled,
+    # unconnected node so artists can manually wire into a second
+    # material slot or a layered shader without losing the reference.
+    if slot == "decal":
+        tex_node.label = f"Decal: {tex_node.label}".strip()
+        return
+
+    if not profile[0]:
+        return
+
+    socket_name = profile[0]
+    if socket_name not in bsdf.inputs:
+        return
+
     nt.links.new(tex_node.outputs["Color"], bsdf.inputs[socket_name])
     if slot == "diffuse" and "Alpha" in bsdf.inputs:
         nt.links.new(tex_node.outputs["Alpha"], bsdf.inputs["Alpha"])
+
+
+def _wire_tint_palette(
+    nt: "bpy.types.NodeTree",
+    material: "Material",
+    bsdf: "bpy.types.Node",
+    diffuse_tex_node: "bpy.types.Node | None",
+    *,
+    y: int,
+) -> None:
+    """Surface PublicParams RGB colours as labelled inputs.
+
+    Primary tint slots (``DiffuseTint``, ``DiffuseTint1`` …) are
+    multiplied into Base Color via a chain of MixRGB(MULTIPLY) nodes
+    inserted between the diffuse texture (or BSDF socket default) and
+    the Principled BSDF Base Color input. Non-primary colour params
+    (``DiffuseTintWear*``, ``DirtColor`` …) are still emitted as
+    labelled RGB nodes so artists can wire them by hand.
+    """
+    # Local import to keep this module's top-level cost minimal.
+    from ..materials.material import (
+        extract_color_params,
+        is_primary_tint_key,
+    )
+
+    color_params = extract_color_params(material.public_params)
+    if not color_params:
+        return
+
+    # Lay RGB nodes out below the texture column.
+    rgb_x = -600
+    primary_chain_output: "bpy.types.NodeSocket | None" = None
+
+    for key, rgb in color_params.items():
+        rgb_node = nt.nodes.new("ShaderNodeRGB")
+        rgb_node.location = (rgb_x, y)
+        rgb_node.label = key
+        rgb_node.name = f"Tint_{key}"
+        rgb_node.outputs["Color"].default_value = (rgb[0], rgb[1], rgb[2], 1.0)
+        y -= 220
+
+        if not is_primary_tint_key(key):
+            continue
+
+        # Build / extend a Multiply mix chain that runs into Base Color.
+        mix = nt.nodes.new("ShaderNodeMixRGB")
+        mix.blend_type = "MULTIPLY"
+        mix.inputs["Fac"].default_value = 1.0
+        mix.location = (rgb_x + 250, y + 220)
+
+        if primary_chain_output is None:
+            # First primary tint — feed from the diffuse texture's
+            # Color output, or fall back to the BSDF's existing Base
+            # Color default.
+            if diffuse_tex_node is not None:
+                # Drop any existing link into Base Color so the mix
+                # chain sits in the middle.
+                for link in list(nt.links):
+                    if link.to_node is bsdf and link.to_socket.name == "Base Color":
+                        nt.links.remove(link)
+                nt.links.new(
+                    diffuse_tex_node.outputs["Color"], mix.inputs["Color1"]
+                )
+            else:
+                bc = bsdf.inputs["Base Color"].default_value
+                mix.inputs["Color1"].default_value = (bc[0], bc[1], bc[2], bc[3])
+        else:
+            nt.links.new(primary_chain_output, mix.inputs["Color1"])
+
+        nt.links.new(rgb_node.outputs["Color"], mix.inputs["Color2"])
+        primary_chain_output = mix.outputs["Color"]
+
+    if primary_chain_output is not None:
+        nt.links.new(primary_chain_output, bsdf.inputs["Base Color"])
 
 
 def _load_image(

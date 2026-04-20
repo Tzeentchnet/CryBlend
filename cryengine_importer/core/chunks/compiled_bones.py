@@ -4,19 +4,15 @@ Port of CgfConverter/CryEngineCore/Chunks/ChunkCompiledBones*.cs.
 Implements 0x800 (584-byte bone records) and 0x801 (324-byte records).
 
 Per-bone PhysicsGeometry payload (104 bytes per LOD, 2 LODs per bone)
-is *not* parsed — we just skip past it. The Blender importer doesn't
-visualise CryEngine's collision primitives.
+is decoded into ``CompiledBone.physics_alive`` / ``physics_dead`` —
+useful for downstream Blender Rigid Body collision wiring.
 """
 
 from __future__ import annotations
 
 from ...enums import ChunkType
-from ...models.skinning import CompiledBone
+from ...models.skinning import CompiledBone, read_bone_physics_geometry
 from ..chunk_registry import Chunk, chunk
-
-
-_PHYSICS_GEOMETRY_BYTES = 104  # one PhysicsGeometry record
-_PHYSICS_BLOCK_BYTES = _PHYSICS_GEOMETRY_BYTES * 2  # alive + dead
 
 
 class ChunkCompiledBones(Chunk):
@@ -54,7 +50,8 @@ class ChunkCompiledBones800(ChunkCompiledBones):
         for _ in range(self.num_bones):
             bone = CompiledBone()
             bone.controller_id = br.read_u32()
-            br.skip(_PHYSICS_BLOCK_BYTES)  # PhysicsGeometry x2
+            bone.physics_alive = read_bone_physics_geometry(br)
+            bone.physics_dead = read_bone_physics_geometry(br)
             br.skip(4)  # mass (single float, unused by importer)
             bone.local_transform_matrix = br.read_matrix3x4()
             bone.world_transform_matrix = br.read_matrix3x4()
@@ -84,7 +81,8 @@ class ChunkCompiledBones801(ChunkCompiledBones):
             bone = CompiledBone()
             bone.controller_id = br.read_u32()
             bone.limb_id = br.read_u32()
-            br.skip(_PHYSICS_BLOCK_BYTES)
+            bone.physics_alive = read_bone_physics_geometry(br)
+            bone.physics_dead = read_bone_physics_geometry(br)
             bone.bone_name = br.read_fstring(48)
             bone.offset_parent = br.read_i32()
             bone.number_of_children = br.read_i32()

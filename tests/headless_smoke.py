@@ -76,6 +76,49 @@ def main() -> int:
             f"[smoke] OK: {len(meshes)} mesh objects, "
             f"{len(empties)} empties, {total_tris} triangles"
         )
+
+        # Phase 11 — metadata stamp on the imported collection.
+        from cryengine_importer.blender.asset_metadata import (  # noqa: E402
+            KEY,
+            SCHEMA_VERSION,
+            find_cryblend_collections,
+        )
+
+        stamped = find_cryblend_collections(bpy.context.scene)
+        if not stamped:
+            print(
+                "[smoke] ERROR: no cryblend-stamped collection found",
+                file=sys.stderr,
+            )
+            return 4
+        meta = dict(stamped[0][KEY])
+        if int(meta.get("schema", 0)) != SCHEMA_VERSION:
+            print(
+                f"[smoke] ERROR: bad schema {meta.get('schema')!r}",
+                file=sys.stderr,
+            )
+            return 5
+        if not meta.get("source_path"):
+            print("[smoke] ERROR: empty source_path in metadata", file=sys.stderr)
+            return 6
+        print(
+            f"[smoke] metadata OK: source={Path(meta['source_path']).name}, "
+            f"libs={len(meta.get('material_libs', []))}, "
+            f"resolved={len(meta.get('material_libs_resolved', []))}, "
+            f"axes={meta.get('axis_forward')}/{meta.get('axis_up')}"
+        )
+
+        # Phase 11 — panel registration smoke (verify the sidebar
+        # classes registered without throwing).
+        try:
+            _ = bpy.types.VIEW3D_PT_cryblend
+            _ = bpy.types.VIEW3D_PT_cryblend_materials
+            _ = bpy.types.VIEW3D_PT_cryblend_tints
+            print("[smoke] panel classes registered")
+        except AttributeError as exc:
+            print(f"[smoke] ERROR: panel class missing: {exc}", file=sys.stderr)
+            return 7
+
         return 0
     except Exception:
         traceback.print_exc()

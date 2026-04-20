@@ -11,6 +11,88 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+# ----------------------------------------------------------- physics ------
+
+
+# Default identity matrix for `BonePhysicsGeometry.frame_matrix`.
+_IDENTITY_3X3: tuple[tuple[float, ...], ...] = (
+    (1.0, 0.0, 0.0),
+    (0.0, 1.0, 0.0),
+    (0.0, 0.0, 1.0),
+)
+
+
+@dataclass
+class BonePhysicsGeometry:
+    """Port of `Models/Structs/Structs.cs#PhysicsGeometry` (104 bytes).
+
+    The on-disk record exists once per "alive" / "dead" LOD on each
+    :class:`CompiledBone` (so 2 × 104 = 208 bytes per bone), and once
+    on each :class:`CompiledPhysicalBone`. Previously skipped — now
+    decoded so consumers can derive Blender Rigid Body collision
+    primitives from the per-bone bounding box (``min`` / ``max``
+    define an axis-aligned box in bone-local space).
+
+    ``physics_geom`` is the geometry-id reference (links to a
+    physicalised mesh elsewhere in the asset); ``flags`` carries the
+    primitive type plus material flags. The remaining fields drive
+    CryEngine's joint constraint solver — kept on the dataclass for
+    completeness but not consumed by the Blender bridge yet.
+    """
+
+    physics_geom: int = 0
+    flags: int = 0
+    min: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    max: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    spring_angle: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    spring_tension: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    damping: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    frame_matrix: tuple[tuple[float, ...], ...] = _IDENTITY_3X3
+
+    @property
+    def is_empty(self) -> bool:
+        """``True`` when the on-disk record carried no geometry id and
+        an empty bounding box (typical for "dead" LOD on rigid bones).
+        """
+        return self.physics_geom == 0 and self.min == self.max == (0.0, 0.0, 0.0)
+
+    @property
+    def extent(self) -> tuple[float, float, float]:
+        """Half-extent of the AABB ``(max - min) / 2``."""
+        return (
+            (self.max[0] - self.min[0]) * 0.5,
+            (self.max[1] - self.min[1]) * 0.5,
+            (self.max[2] - self.min[2]) * 0.5,
+        )
+
+    @property
+    def center(self) -> tuple[float, float, float]:
+        """Geometric centre of the AABB."""
+        return (
+            (self.max[0] + self.min[0]) * 0.5,
+            (self.max[1] + self.min[1]) * 0.5,
+            (self.max[2] + self.min[2]) * 0.5,
+        )
+
+
+def read_bone_physics_geometry(br) -> BonePhysicsGeometry:
+    """Read one 104-byte ``PhysicsGeometry`` record from ``br``.
+
+    Mirrors `PhysicsGeometry.ReadPhysicsGeometry` in the C# tree:
+    u32 + u32 + 5 × Vec3 + Mat3x3 = 4+4+60+36 = 104 bytes.
+    """
+    geom = BonePhysicsGeometry()
+    geom.physics_geom = br.read_u32()
+    geom.flags = br.read_u32()
+    geom.min = br.read_vec3()
+    geom.max = br.read_vec3()
+    geom.spring_angle = br.read_vec3()
+    geom.spring_tension = br.read_vec3()
+    geom.damping = br.read_vec3()
+    geom.frame_matrix = br.read_matrix3x3()
+    return geom
+
+
 # ----------------------------------------------------------- bones --------
 
 
@@ -18,8 +100,10 @@ from typing import Optional
 class CompiledBone:
     """Port of CgfConverter/Models/CompiledBone.cs.
 
-    Skips the per-bone PhysicsGeometry payload (we don't render it),
-    but keeps all transform / hierarchy fields.
+    The on-disk record carries two ``PhysicsGeometry`` payloads (alive
+    / dead LOD); both are now decoded into ``physics_alive`` /
+    ``physics_dead`` rather than skipped. Defaults to "empty" geometry
+    so legacy callers behave the same.
     """
 
     controller_id: int = 0
@@ -60,6 +144,12 @@ class CompiledBone:
     parent_controller_index: int = 0
     child_ids: list[int] = field(default_factory=list)
 
+    # Per-LOD physics geometry (legacy 0x800 / 0x801 only). ``None``
+    # when the source chunk doesn't carry physics records (IVO 0x900 /
+    # 0x901 readers leave both fields as ``None``).
+    physics_alive: Optional[BonePhysicsGeometry] = None
+    physics_dead: Optional[BonePhysicsGeometry] = None
+
 
 # ----------------------------------------------------------- physical -----
 
@@ -74,6 +164,10 @@ class CompiledPhysicalBone:
     controller_id: int = 0
     parent_id: int = 0
     child_ids: list[int] = field(default_factory=list)
+    # Decoded 104-byte ``PhysicsGeometry`` (was previously skipped).
+    # ``None`` only when the dataclass is constructed directly without
+    # a chunk reader (e.g. in test fixtures).
+    physics_geometry: Optional[BonePhysicsGeometry] = None
 
 
 @dataclass

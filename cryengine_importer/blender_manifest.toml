@@ -17,4 +17,4 @@ copyright = ["2026 Cryengine-Converter contributors"]
 tags = ["Import-Export"]
 
 [permissions]
-files = "Read CryEngine model, material, and texture files from disk during import."
+files = "Read CryEngine model, material, and texture files"

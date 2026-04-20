@@ -197,17 +197,18 @@ class CryEngine:
 
     def _auto_detect_companion(self, path: str, input_files: list[str]) -> None:
         """Look for the geometry-only companion of a `.cga` / `.chr`
-        (i.e. `.cgam` / `.chrm`)."""
-        ext = PurePosixPath(path).suffix
-        if not ext:
-            return
-        m_path = path[: -len(ext)] + ext + "m"
-        if self.pack_fs.exists(m_path):
-            input_files.append(m_path)
+        (i.e. `.cgam` / `.chrm` / `.skinm`).
+
+        Delegates to :func:`io.asset_resolver.resolve_companions` so
+        the same logic is reusable from a future "browse pack file" UI.
+        """
+        from ..io.asset_resolver import resolve_companions
+
+        companions = resolve_companions(path, self.pack_fs)
+        if companions.companion is not None:
+            input_files.append(companions.companion)
         else:
-            logger.debug(
-                "no companion geometry file found at %s", m_path
-            )
+            logger.debug("no companion geometry file found for %s", path)
 
     # --- node hierarchy -----------------------------------------------
 

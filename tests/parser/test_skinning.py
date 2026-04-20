@@ -10,6 +10,12 @@ from cryengine_importer.core.chunks.header import ChunkHeader746
 from cryengine_importer.core.model import Model
 from cryengine_importer.enums import ChunkType, FileVersion
 from cryengine_importer.io.binary_reader import BinaryReader
+import pytest
+
+from cryengine_importer.models.skinning import (
+    BonePhysicsGeometry,
+    read_bone_physics_geometry,
+)
 
 
 # -- helper ---------------------------------------------------------------
@@ -240,3 +246,120 @@ def test_bone_name_list_745() -> None:
     chunk = _drive((ChunkType.BoneNameList, 0x745), body)
     assert chunk.num_entities == 3
     assert chunk.bone_names == ["root", "hip", "thigh"]
+
+
+# -- BonePhysicsGeometry decode (Phase 10) --------------------------------
+
+
+def _physics_geometry_record(
+    *,
+    physics_geom: int = 0,
+    flags: int = 0,
+    aabb_min: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    aabb_max: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    spring_angle: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    spring_tension: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    damping: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    frame_matrix: tuple[tuple[float, ...], ...] = (
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+    ),
+) -> bytes:
+    body = struct.pack("<II", physics_geom, flags)
+    body += struct.pack("<3f", *aabb_min)
+    body += struct.pack("<3f", *aabb_max)
+    body += struct.pack("<3f", *spring_angle)
+    body += struct.pack("<3f", *spring_tension)
+    body += struct.pack("<3f", *damping)
+    for row in frame_matrix:
+        body += struct.pack("<3f", *row)
+    assert len(body) == 104, len(body)
+    return body
+
+
+def test_read_bone_physics_geometry_decodes_full_record() -> None:
+    record = _physics_geometry_record(
+        physics_geom=0x12345678,
+        flags=0x0C,
+        aabb_min=(-1.0, -2.0, -3.0),
+        aabb_max=(1.0, 2.0, 3.0),
+        spring_angle=(0.1, 0.2, 0.3),
+        spring_tension=(10.0, 20.0, 30.0),
+        damping=(0.5, 0.6, 0.7),
+        frame_matrix=((0.0, 1.0, 0.0), (-1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
+    )
+    geom = read_bone_physics_geometry(BinaryReader(io.BytesIO(record)))
+    assert isinstance(geom, BonePhysicsGeometry)
+    assert geom.physics_geom == 0x12345678
+    assert geom.flags == 0x0C
+    assert geom.min == (-1.0, -2.0, -3.0)
+    assert geom.max == (1.0, 2.0, 3.0)
+    assert geom.spring_angle == pytest.approx((0.1, 0.2, 0.3), rel=1e-6)
+    assert geom.spring_tension == (10.0, 20.0, 30.0)
+    assert geom.damping == pytest.approx((0.5, 0.6, 0.7), rel=1e-6)
+    assert geom.frame_matrix == ((0.0, 1.0, 0.0), (-1.0, 0.0, 0.0), (0.0, 0.0, 1.0))
+    assert not geom.is_empty
+    assert geom.center == (0.0, 0.0, 0.0)
+    assert geom.extent == (1.0, 2.0, 3.0)
+
+
+def test_bone_physics_geometry_is_empty_default() -> None:
+    record = _physics_geometry_record()
+    geom = read_bone_physics_geometry(BinaryReader(io.BytesIO(record)))
+    assert geom.is_empty
+    assert geom.extent == (0.0, 0.0, 0.0)
+
+
+def test_compiled_bones_800_decodes_physics_geometry() -> None:
+    """Patch a non-zero ``PhysicsGeometry`` block into the bone record
+    fixture and confirm both alive + dead LODs are populated."""
+    alive = _physics_geometry_record(
+        physics_geom=0xAA, aabb_min=(-0.5, -0.5, -0.5), aabb_max=(0.5, 0.5, 0.5)
+    )
+    dead = _physics_geometry_record(physics_geom=0xBB)
+
+    body = struct.pack("<I", 0xCAFE)  # controller_id
+    body += alive + dead
+    body += struct.pack("<f", 1.0)  # mass
+    body += struct.pack(
+        "<12f", 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0
+    )  # local 3x4
+    body += struct.pack(
+        "<12f", 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0
+    )  # world 3x4
+    body += b"root".ljust(256, b"\x00")
+    body += struct.pack("<IiiI", 0xFFFFFFFF, 0, 0, 0)
+    assert len(body) == 584
+
+    chunk = _drive((ChunkType.CompiledBones, 0x800), _zero(32) + body)
+    bone = chunk.bone_list[0]
+    assert bone.physics_alive is not None
+    assert bone.physics_alive.physics_geom == 0xAA
+    assert bone.physics_alive.min == (-0.5, -0.5, -0.5)
+    assert bone.physics_alive.max == (0.5, 0.5, 0.5)
+    assert bone.physics_dead is not None
+    assert bone.physics_dead.physics_geom == 0xBB
+    # Min/max are zero on the dead LOD even though physics_geom != 0.
+    assert bone.physics_dead.min == bone.physics_dead.max == (0.0, 0.0, 0.0)
+
+
+def test_compiled_physical_bones_800_decodes_physics_geometry() -> None:
+    body = struct.pack("<IIII", 0, 0, 0, 0xC001)  # bone, parent_off, nChild, ctrl
+    body += _zero(32)  # prop char[32]
+    body += _physics_geometry_record(
+        physics_geom=0xDEAD,
+        flags=0x05,
+        aabb_min=(-1.0, 0.0, 0.0),
+        aabb_max=(1.0, 0.5, 0.25),
+    )
+    assert len(body) == 152
+
+    chunk = _drive((ChunkType.CompiledPhysicalBones, 0x800), _zero(32) + body)
+    bone = chunk.physical_bone_list[0]
+    assert bone.controller_id == 0xC001
+    assert bone.physics_geometry is not None
+    assert bone.physics_geometry.physics_geom == 0xDEAD
+    assert bone.physics_geometry.flags == 0x05
+    assert bone.physics_geometry.center == (0.0, 0.25, 0.125)
+    assert bone.physics_geometry.extent == (1.0, 0.25, 0.125)

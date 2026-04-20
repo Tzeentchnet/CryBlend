@@ -17,7 +17,20 @@ from bpy_extras.io_utils import ImportHelper, axis_conversion  # type: ignore[im
 from ..core.cryengine import CryEngine, UnsupportedFileError
 from ..io.pack_fs import RealFileSystem
 from .._logging import attach_for_operator
+from .asset_metadata import stamp_collection
 from .scene_builder import build_scene
+
+
+def _addon_version_string() -> str:
+    """Return the addon version as ``"X.Y.Z"`` from the package
+    ``bl_info`` dict, falling back to ``"0.0.0"``."""
+    try:
+        from .. import bl_info  # type: ignore[attr-defined]
+
+        version = bl_info.get("version", (0, 0, 0))
+        return ".".join(str(v) for v in version)
+    except Exception:  # pragma: no cover - defensive
+        return "0.0.0"
 
 
 class IMPORT_OT_cryengine(Operator, ImportHelper):
@@ -181,6 +194,30 @@ class IMPORT_OT_cryengine(Operator, ImportHelper):
             except Exception as exc:  # pragma: no cover - exercised in Blender
                 return False, f"Failed to build scene for {filepath}: {exc}"
 
+            # Stamp post-import metadata for the Phase-11 sidebar UI.
+            try:
+                pp_cache: dict[str, dict[str, str]] = {}
+                for lib in asset.materials.values():
+                    for sub in lib.sub_materials or [lib]:
+                        if sub.name and sub.public_params:
+                            pp_cache[sub.name] = dict(sub.public_params)
+                stamp_collection(
+                    collection,
+                    source_path=filepath,
+                    object_dir=self.object_dir or None,
+                    material_libs=asset.material_library_files,
+                    material_libs_resolved=list(asset.materials.keys()),
+                    axis_forward=self.axis_forward,
+                    axis_up=self.axis_up,
+                    convert_axes=self.convert_axes,
+                    import_related=self.import_related,
+                    addon_version=_addon_version_string(),
+                    public_params_by_material=pp_cache or None,
+                )
+            except Exception:  # pragma: no cover - defensive
+                logger = __import__("logging").getLogger(__name__)
+                logger.debug("failed to stamp cryblend metadata", exc_info=True)
+
             # Surface a hint when material libraries silently failed to
             # resolve and the user didn't supply an object directory.
             if (
@@ -258,9 +295,16 @@ def register() -> None:
     for cls in _classes:
         bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+    # Phase 11 sidebar panel + operators.
+    from . import panel
+
+    panel.register()
 
 
 def unregister() -> None:
+    from . import panel
+
+    panel.unregister()
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)
