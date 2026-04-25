@@ -26,3 +26,4 @@ Thumbs.db
 # Blender
 *.blend1
 *.blend2
+/archive/

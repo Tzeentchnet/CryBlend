@@ -221,8 +221,8 @@ class CryEngine:
                 len(self.skinning_info.physical_bones),
                 len(self.skinning_info.int_vertices),
             )
-        self._load_materials()
         self._collect_material_library_files()
+        self._load_materials()
         logger.info(
             "materials: %d/%d libraries resolved",
             len(self.materials),

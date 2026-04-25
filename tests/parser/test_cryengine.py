@@ -227,3 +227,55 @@ def test_process_loads_companion_cgam(tmp_path) -> None:
     assert eng.models[1].file_name == "hero.cgam"
     assert not eng.is_ivo
     assert eng.root_node is None  # no node chunks
+
+
+def test_process_collects_libraries_before_loading_materials(monkeypatch) -> None:
+    """Regression: `process()` must call `_collect_material_library_files`
+    BEFORE `_load_materials`. The previous order left `asset.materials`
+    empty because the loader exits early when no library names are known.
+    """
+    from cryengine_importer.core import cryengine as ce_mod
+
+    mtl_chunk = _make_mtl(10, "lib", MtlNameType.Library)
+    stub_model = _model_from_chunks("hero.cgf", [mtl_chunk])
+
+    monkeypatch.setattr(
+        ce_mod.Model, "from_stream", classmethod(lambda cls, name, stream: stub_model)
+    )
+
+    fs = InMemoryFileSystem({"hero.cgf": b""})
+    eng = CryEngine("hero.cgf", fs, load_related=False)
+
+    calls: list[str] = []
+    real_collect = eng._collect_material_library_files
+    real_load = eng._load_materials
+
+    def collect_spy() -> None:
+        calls.append("collect")
+        real_collect()
+
+    def load_spy() -> None:
+        calls.append("load")
+        # Snapshot what the loader sees at call time.
+        calls.append(f"libs={list(eng.material_library_files)}")
+        real_load()
+
+    monkeypatch.setattr(eng, "_collect_material_library_files", collect_spy)
+    monkeypatch.setattr(eng, "_load_materials", load_spy)
+
+    # Stub the materials loader so we don't depend on cry_xml round-trip;
+    # what we care about is *that* it gets invoked with a non-empty list.
+    sentinel = object()
+    from cryengine_importer import materials as materials_pkg
+
+    def fake_loader(names, pack_fs, *, object_dir=None):
+        return {n: sentinel for n in names}
+
+    monkeypatch.setattr(materials_pkg, "load_material_libraries", fake_loader)
+
+    eng.process()
+
+    assert calls[:2] == ["collect", "load"], calls
+    assert calls[2] == "libs=['lib']", calls
+    assert eng.material_library_files == ["lib"]
+    assert eng.materials == {"lib": sentinel}
