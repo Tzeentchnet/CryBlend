@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from cryengine_importer.blender.crysis2_tools import (
+    CRYSIS1,
+    CRYSIS2,
+    CRYSIS3,
     PHYSICALIZE_LABELS,
     cryexport_node_name_from_filename,
+    detect_crysis1_lod_level,
     extract_cryexport_node_suffix,
     format_export_options,
+    get_crytools_profile,
+    is_crysis1_piece_child,
     is_cryexport_node_name,
     is_excluded_node_name,
     is_valid_export_filename,
@@ -14,6 +20,7 @@ from cryengine_importer.blender.crysis2_tools import (
     parse_property_rows,
     shape_key_summary,
     skin_validation_summary,
+    suggest_crysis1_lod_name,
     summarize_material_ids,
     validate_pieces_references,
 )
@@ -61,6 +68,19 @@ def test_cryexport_node_suffix_and_formatting() -> None:
     assert cryexport_node_name_from_filename("objects/tank.cgf") == "CryExportNode_tank"
 
 
+def test_profile_definitions_and_export_node_styles() -> None:
+    assert get_crytools_profile(CRYSIS1).display_label == "Crysis 1 / CE2"
+    assert get_crytools_profile(CRYSIS2).max_skin_influences == 5
+    assert get_crytools_profile(CRYSIS3).max_skin_influences == 8
+
+    assert cryexport_node_name_from_filename("tank.cgf", profile=CRYSIS1) == "tank_CryExportNode"
+    assert cryexport_node_name_from_filename("tank.cgf", profile=CRYSIS2) == "CryExportNode_tank"
+    assert cryexport_node_name_from_filename("tank.cgf", profile=CRYSIS3) == "CryExport_tank"
+    assert is_cryexport_node_name("tank_CryExportNode", profile=CRYSIS1)
+    assert extract_cryexport_node_suffix("tank_CryExportNode", profile=CRYSIS1) == "tank"
+    assert is_cryexport_node_name("CryExport_vehicle", profile=CRYSIS3)
+
+
 def test_excluded_node_prefix_matches_max_tools() -> None:
     assert is_excluded_node_name("_helper")
     assert not is_excluded_node_name("helper")
@@ -89,6 +109,21 @@ def test_property_rows_and_pieces_reference_validation() -> None:
     validation = validate_pieces_references(rows, ["wheel", "door"])
     assert validation.references == ("wheel", "hull")
     assert validation.missing == ("hull",)
+
+
+def test_crysis1_lod_and_piece_helpers() -> None:
+    assert detect_crysis1_lod_level("tank-LOD2-hull") == 2
+    assert detect_crysis1_lod_level("tank_LOD2_hull") is None
+    assert suggest_crysis1_lod_name("tank-LOD2-hull") == "tank_LOD2_hull"
+    assert is_crysis1_piece_child("wall-piece01")
+
+    validation = validate_pieces_references(
+        "pieces=wheel tank-LOD3-hull missing",
+        ["wheel"],
+        profile=CRYSIS1,
+    )
+    assert validation.references == ("wheel", "tank-LOD3-hull", "missing")
+    assert validation.missing == ("missing",)
 
 
 def test_physicalize_labels_are_canonical() -> None:

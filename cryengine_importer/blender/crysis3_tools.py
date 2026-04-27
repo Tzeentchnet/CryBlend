@@ -15,6 +15,17 @@ from dataclasses import dataclass
 from html import escape
 from typing import Any, Iterable, Mapping, Sequence
 
+from .crysis2_tools import (
+    CRYSIS1,
+    CRYSIS3,
+    CryToolsProfile,
+    detect_crysis1_lod_level,
+    get_crytools_profile,
+    is_crysis1_piece_child,
+    is_cryexport_node_name,
+    suggest_crysis1_lod_name,
+)
+
 
 CRYSIS3_METADATA_KEY = "cryblend_c3_metadata"
 
@@ -207,6 +218,25 @@ def audit_crysis3_asset(
     The records are intentionally plain mappings so Blender-bound code can
     collect scene facts while tests can exercise the rules without ``bpy``.
     """
+    return audit_crytools_asset(
+        objects,
+        materials,
+        profile=CRYSIS3,
+        fps=fps,
+        unit_system=unit_system,
+    )
+
+
+def audit_crytools_asset(
+    objects: Iterable[Mapping[str, Any]],
+    materials: Iterable[Mapping[str, Any]] | None = None,
+    *,
+    profile: str | CryToolsProfile | None = None,
+    fps: float | None = None,
+    unit_system: str | None = None,
+) -> list[Crysis3AuditIssue]:
+    """Return CryTools-inspired scene audit findings for a target profile."""
+    target = get_crytools_profile(profile or CRYSIS3)
     object_rows = list(objects)
     material_rows = list(materials or [])
     issues: list[Crysis3AuditIssue] = []
@@ -230,34 +260,45 @@ def audit_crysis3_asset(
             )
         )
 
-    export_roots = [row for row in object_rows if _is_c3_export_root(row)]
+    export_roots = [row for row in object_rows if _is_export_root(row, target)]
     if not export_roots:
         issues.append(
             Crysis3AuditIssue(
                 "warning",
                 "no-export-roots",
                 "Scene",
-                "No CryExport root found. Original Crysis 3 tools export from CryExport_* nodes.",
+                f"No CryExport root found for {target.display_label}.",
             )
         )
 
-    _audit_export_roots(export_roots, issues)
-    _audit_duplicate_export_names(object_rows, issues)
+    _audit_export_roots(export_roots, issues, target)
+    _audit_duplicate_export_names(object_rows, issues, target)
     for row in object_rows:
-        _audit_object(row, issues)
+        _audit_object(row, issues, target)
     _audit_materials(material_rows, issues)
     return issues
 
 
 def format_crysis3_audit_report(issues: Sequence[Crysis3AuditIssue]) -> str:
     """Format audit findings as a clipboard/report-friendly text block."""
+    return format_crytools_audit_report(issues, profile=CRYSIS3)
+
+
+def format_crytools_audit_report(
+    issues: Sequence[Crysis3AuditIssue],
+    *,
+    profile: str | CryToolsProfile | None = None,
+) -> str:
+    """Format audit findings as a clipboard/report-friendly text block."""
+    target = get_crytools_profile(profile or CRYSIS3)
+    title = f"{target.display_label} Asset Audit"
     if not issues:
-        return "Crysis 3 Asset Audit\nNo issues found."
+        return f"{title}\nNo issues found."
     counts = {"error": 0, "warning": 0, "info": 0}
     for issue in issues:
         counts[issue.severity] = counts.get(issue.severity, 0) + 1
     lines = [
-        "Crysis 3 Asset Audit",
+        title,
         f"Errors: {counts.get('error', 0)}  Warnings: {counts.get('warning', 0)}  Info: {counts.get('info', 0)}",
         "",
     ]
@@ -272,30 +313,36 @@ def format_crysis3_audit_report(issues: Sequence[Crysis3AuditIssue]) -> str:
     return "\n".join(lines)
 
 
-def _is_c3_export_root(row: Mapping[str, Any]) -> bool:
+def _is_export_root(row: Mapping[str, Any], profile: CryToolsProfile) -> bool:
     name = str(row.get("name", ""))
     export_type = str(row.get("export_type", "")).strip()
-    return name.startswith(C3_EXPORT_ROOT_PREFIXES) or bool(export_type)
+    return is_cryexport_node_name(name, profile=profile) or bool(export_type)
+
+
+def _is_c3_export_root(row: Mapping[str, Any]) -> bool:
+    return _is_export_root(row, get_crytools_profile(CRYSIS3))
 
 
 def _audit_export_roots(
     export_roots: Sequence[Mapping[str, Any]],
     issues: list[Crysis3AuditIssue],
+    profile: CryToolsProfile,
 ) -> None:
     seen_filenames: dict[str, str] = {}
     for row in export_roots:
         name = str(row.get("name", "")) or "<unnamed>"
         export_type = str(row.get("export_type", "")).strip().lower()
-        if not name.startswith(C3_EXPORT_ROOT_PREFIXES):
+        if not is_cryexport_node_name(name, profile=profile):
+            expected = " or ".join(profile.export_root_prefixes)
             issues.append(
                 Crysis3AuditIssue(
                     "warning",
                     "export-root-prefix",
                     name,
-                    "Export roots should use the CryExport_ or CryExportNode_ prefix.",
+                    f"Export roots should use the {profile.display_label} naming convention ({expected}).",
                 )
             )
-        if not export_type:
+        if profile.key == CRYSIS3 and not export_type:
             issues.append(
                 Crysis3AuditIssue(
                     "warning",
@@ -304,7 +351,7 @@ def _audit_export_roots(
                     "Export root has no Crysis 3 export type metadata.",
                 )
             )
-        elif export_type not in C3_EXPORT_TYPES:
+        elif profile.key == CRYSIS3 and export_type and export_type not in C3_EXPORT_TYPES:
             issues.append(
                 Crysis3AuditIssue(
                     "error",
@@ -322,7 +369,7 @@ def _audit_export_roots(
                     "Export root has no children.",
                 )
             )
-        filename = str(row.get("filename", "")).strip() or _export_filename_from_name(name)
+        filename = str(row.get("filename", "")).strip() or _export_filename_from_name(name, profile)
         if filename:
             if not _is_valid_cry_filename(filename):
                 issues.append(
@@ -350,13 +397,14 @@ def _audit_export_roots(
 def _audit_duplicate_export_names(
     rows: Sequence[Mapping[str, Any]],
     issues: list[Crysis3AuditIssue],
+    profile: CryToolsProfile,
 ) -> None:
     seen: dict[str, str] = {}
     for row in rows:
         name = str(row.get("name", ""))
         if not name:
             continue
-        clean = _clean_export_name(name)
+        clean = _clean_export_name(name, profile)
         previous = seen.get(clean.lower())
         if previous is None:
             seen[clean.lower()] = name
@@ -371,9 +419,33 @@ def _audit_duplicate_export_names(
             )
 
 
-def _audit_object(row: Mapping[str, Any], issues: list[Crysis3AuditIssue]) -> None:
+def _audit_object(
+    row: Mapping[str, Any],
+    issues: list[Crysis3AuditIssue],
+    profile: CryToolsProfile,
+) -> None:
     name = str(row.get("name", "")) or "<unnamed>"
     obj_type = str(row.get("type", "")).upper()
+    if profile.key == CRYSIS1:
+        lod_level = detect_crysis1_lod_level(name)
+        if lod_level is not None:
+            issues.append(
+                Crysis3AuditIssue(
+                    "info",
+                    "c1-lod-marker",
+                    name,
+                    f"Legacy -LOD{lod_level}- marker detected; consider {suggest_crysis1_lod_name(name)}.",
+                )
+            )
+        if is_crysis1_piece_child(name):
+            issues.append(
+                Crysis3AuditIssue(
+                    "info",
+                    "c1-breakable-piece",
+                    name,
+                    "Name looks like a CE2 breakable -piece child.",
+                )
+            )
     if obj_type == "MESH":
         vertices = int(row.get("vertices", 0) or 0)
         faces = int(row.get("faces", 0) or 0)
@@ -439,9 +511,9 @@ def _audit_object(row: Mapping[str, Any], issues: list[Crysis3AuditIssue]) -> No
                     "Object has non-uniform scale; apply transforms before export.",
                 )
             )
-        _audit_skinning(row, issues)
+        _audit_skinning(row, issues, profile)
 
-    if _is_c3_export_root(row):
+    if _is_export_root(row, profile):
         export_type = str(row.get("export_type", "")).strip().lower()
         if export_type in {"character", "skin"} and not row.get("has_skeleton"):
             issues.append(
@@ -454,7 +526,11 @@ def _audit_object(row: Mapping[str, Any], issues: list[Crysis3AuditIssue]) -> No
             )
 
 
-def _audit_skinning(row: Mapping[str, Any], issues: list[Crysis3AuditIssue]) -> None:
+def _audit_skinning(
+    row: Mapping[str, Any],
+    issues: list[Crysis3AuditIssue],
+    profile: CryToolsProfile,
+) -> None:
     if not row.get("is_skinned"):
         return
     name = str(row.get("name", "")) or "<unnamed>"
@@ -484,7 +560,7 @@ def _audit_skinning(row: Mapping[str, Any], issues: list[Crysis3AuditIssue]) -> 
                 "error",
                 "skin-too-many-influences",
                 name,
-                f"{too_many_influences} vertex/vertices exceed the 8-influence CryEngine limit.",
+                f"{too_many_influences} vertex/vertices exceed the {profile.max_skin_influences}-influence {profile.display_label} limit.",
             )
         )
 
@@ -556,8 +632,13 @@ def _audit_materials(
             )
 
 
-def _export_filename_from_name(name: str) -> str:
-    for prefix in C3_EXPORT_ROOT_PREFIXES:
+def _export_filename_from_name(name: str, profile: CryToolsProfile) -> str:
+    if profile.export_node_style == "suffix":
+        suffix = profile.export_root_prefixes[0]
+        if name.lower().endswith(suffix.lower()):
+            return name[: -len(suffix)]
+        return name
+    for prefix in profile.export_root_prefixes:
         if name.startswith(prefix):
             return name[len(prefix) :]
     return name
@@ -568,10 +649,21 @@ def _is_valid_cry_filename(name: str) -> bool:
     return bool(stem) and re.fullmatch(r"[A-Za-z0-9_]+", stem) is not None
 
 
-def _clean_export_name(name: str) -> str:
+def _clean_export_name(name: str, profile: CryToolsProfile) -> str:
     clean = name.split("|", 1)[-1]
+    if profile.export_node_style == "suffix":
+        suffix = profile.export_root_prefixes[0]
+        if clean.lower().endswith(suffix.lower()):
+            clean = clean[: -len(suffix)]
+    else:
+        for prefix in profile.export_root_prefixes:
+            if clean.lower().startswith(prefix.lower()):
+                clean = clean[len(prefix) :]
+                break
     clean = re.sub(r"\.\d+$", "", clean)
     clean = re.sub(r"_lod[0-5]$", "", clean, flags=re.IGNORECASE)
+    if profile.key == CRYSIS1:
+        clean = re.sub(r"-lod[1-4]-", "_lod_", clean, flags=re.IGNORECASE)
     return clean
 
 
@@ -623,9 +715,11 @@ __all__ = [
     "C3_EXPORT_TYPES",
     "C3_PHYSICALIZE_SURFACES",
     "Crysis3AuditIssue",
+    "audit_crytools_asset",
     "audit_crysis3_asset",
     "apply_crysis3_settings",
     "format_attachment_xml",
+    "format_crytools_audit_report",
     "format_crysis3_audit_report",
     "metadata_to_udp_lines",
     "metadata_value_matches",

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 import shlex
-from typing import Mapping, Sequence
+from typing import Literal, Mapping, Sequence
 
 
 CRYSIS2_EXPORT_OPTIONS_KEY = "cryblend_c2_export_options"
@@ -18,10 +18,68 @@ CRYSIS2_OBJECT_PROPERTIES_KEY = "cryblend_c2_properties"
 CRYSIS2_PHYSICALIZE_KEY = "cryblend_c2_physicalize"
 
 CRYEXPORT_NODE_PREFIX = "CryExportNode_"
+CRYEXPORT_NODE_SUFFIX = "_CryExportNode"
 PHYSICALIZE_LABELS = ("Default", "ProxyNoDraw", "NoCollide", "Obstruct")
+
+CryToolsProfileKey = Literal["CRYSIS1", "CRYSIS2", "CRYSIS3"]
+
+CRYSIS1 = "CRYSIS1"
+CRYSIS2 = "CRYSIS2"
+CRYSIS3 = "CRYSIS3"
 
 _MATERIAL_ID_RE = re.compile(r"^_(\d+)_(.+)$")
 _FILENAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
+_C1_LOD_RE = re.compile(r"-LOD([1-4])-", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class CryToolsProfile:
+    key: CryToolsProfileKey
+    display_label: str
+    export_node_style: Literal["suffix", "prefix", "c3_prefix"]
+    export_root_prefixes: tuple[str, ...]
+    max_skin_influences: int
+    export_filetype_labels: tuple[str, ...]
+    rc_note: str
+    lod_note: str
+    piece_note: str
+
+
+CRYTOOLS_PROFILES: dict[CryToolsProfileKey, CryToolsProfile] = {
+    CRYSIS1: CryToolsProfile(
+        key=CRYSIS1,
+        display_label="Crysis 1 / CE2",
+        export_node_style="suffix",
+        export_root_prefixes=(CRYEXPORT_NODE_SUFFIX,),
+        max_skin_influences=5,
+        export_filetype_labels=("CGF", "CGA", "CHR", "CAF"),
+        rc_note="Legacy RC profiles commonly use /skipmateriallibrarycreation for CE2 assets.",
+        lod_note="Use _LOD1_ through _LOD4_; legacy -LOD#- markers are detected for cleanup.",
+        piece_note="Breakable child pieces commonly use -piece names and pieces= object properties.",
+    ),
+    CRYSIS2: CryToolsProfile(
+        key=CRYSIS2,
+        display_label="Crysis 2",
+        export_node_style="prefix",
+        export_root_prefixes=(CRYEXPORT_NODE_PREFIX,),
+        max_skin_influences=5,
+        export_filetype_labels=("CGF", "CGA", "CHR", "CAF"),
+        rc_note="Use the project's Crysis 2 Resource Compiler profile when exporting.",
+        lod_note="Keep LOD pieces explicitly named and grouped under the export node.",
+        piece_note="Validate pieces= references against objects in the export set.",
+    ),
+    CRYSIS3: CryToolsProfile(
+        key=CRYSIS3,
+        display_label="Crysis 3",
+        export_node_style="c3_prefix",
+        export_root_prefixes=("CryExport_", CRYEXPORT_NODE_PREFIX),
+        max_skin_influences=8,
+        export_filetype_labels=("CGF", "CGA", "CHR", "SKIN", "CAF"),
+        rc_note="Use the Crysis 3 Resource Compiler profile and game-specific export type metadata.",
+        lod_note="Crysis 3 audit accepts CryExport_ and CryExportNode_ roots.",
+        piece_note="Destroyable metadata lives on object UDP tags such as entity, rotaxes, and sizevar.",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -46,6 +104,17 @@ class MaterialIdSummary:
 class PiecesValidation:
     references: tuple[str, ...]
     missing: tuple[str, ...]
+
+
+def get_crytools_profile(profile: str | CryToolsProfile | None = None) -> CryToolsProfile:
+    """Return a target profile, defaulting to the existing Crysis 2 behavior."""
+    if isinstance(profile, CryToolsProfile):
+        return profile
+    key = (profile or CRYSIS2).upper()
+    try:
+        return CRYTOOLS_PROFILES[key]  # type: ignore[index]
+    except KeyError as exc:
+        raise ValueError(f"Unknown CryTools profile: {profile!r}") from exc
 
 
 def parse_material_id_name(name: str, *, max_id: int = 31) -> MaterialIdInfo:
@@ -97,23 +166,51 @@ def export_filename_stem(path_or_stem: str) -> str:
     return trimmed
 
 
-def is_cryexport_node_name(name: str) -> bool:
-    """Return whether ``name`` starts with CryExportNode_, case-insensitive."""
-    return name.lower().startswith(CRYEXPORT_NODE_PREFIX.lower()) and bool(
-        extract_cryexport_node_suffix(name)
-    )
+def is_cryexport_node_name(name: str, *, profile: str | CryToolsProfile | None = None) -> bool:
+    """Return whether ``name`` matches the target CryExport node convention."""
+    return bool(extract_cryexport_node_suffix(name, profile=profile))
 
 
-def extract_cryexport_node_suffix(name: str) -> str:
-    """Return the part after CryExportNode_ or an empty string."""
-    if not name.lower().startswith(CRYEXPORT_NODE_PREFIX.lower()):
-        return ""
-    return name[len(CRYEXPORT_NODE_PREFIX) :]
+def extract_cryexport_node_suffix(name: str, *, profile: str | CryToolsProfile | None = None) -> str:
+    """Return the export stem from a CryExport node name or an empty string."""
+    target = get_crytools_profile(profile)
+    lower = name.lower()
+    if target.export_node_style == "suffix":
+        suffix = CRYEXPORT_NODE_SUFFIX.lower()
+        if not lower.endswith(suffix):
+            return ""
+        return name[: -len(CRYEXPORT_NODE_SUFFIX)]
+    for prefix in target.export_root_prefixes:
+        if lower.startswith(prefix.lower()):
+            return name[len(prefix) :]
+    return ""
 
 
-def cryexport_node_name_from_filename(path_or_stem: str) -> str:
+def cryexport_node_name_from_filename(path_or_stem: str, *, profile: str | CryToolsProfile | None = None) -> str:
     """Format a CryExportNode name from an export filename or stem."""
-    return f"{CRYEXPORT_NODE_PREFIX}{export_filename_stem(path_or_stem)}"
+    stem = export_filename_stem(path_or_stem)
+    target = get_crytools_profile(profile)
+    if target.export_node_style == "suffix":
+        return f"{stem}{CRYEXPORT_NODE_SUFFIX}"
+    if target.export_node_style == "c3_prefix":
+        return f"CryExport_{stem}"
+    return f"{CRYEXPORT_NODE_PREFIX}{stem}"
+
+
+def detect_crysis1_lod_level(name: str) -> int | None:
+    """Return a CE2 legacy ``-LOD#-`` level, if present."""
+    match = _C1_LOD_RE.search(name)
+    return int(match.group(1)) if match else None
+
+
+def suggest_crysis1_lod_name(name: str) -> str:
+    """Suggest ``_LOD#_`` normalization for legacy CE2 ``-LOD#-`` names."""
+    return _C1_LOD_RE.sub(lambda match: f"_LOD{match.group(1)}_", name)
+
+
+def is_crysis1_piece_child(name: str) -> bool:
+    """Return whether ``name`` looks like a CE2 breakable ``-piece`` child."""
+    return "-piece" in name.lower()
 
 
 def is_excluded_node_name(name: str) -> bool:
@@ -189,13 +286,20 @@ def parse_property_rows(text: str | Mapping[str, object] | None) -> dict[str, st
 def validate_pieces_references(
     properties: str | Mapping[str, object] | None,
     valid_object_names: Sequence[str],
+    *,
+    profile: str | CryToolsProfile | None = None,
 ) -> PiecesValidation:
     """Validate that every ``pieces=`` reference exists in the export set."""
     rows = parse_property_rows(properties)
     pieces = rows.get("pieces") or rows.get("Pieces") or ""
     references = tuple(part for part in re.split(r"[,\s]+", pieces.strip()) if part)
+    target = get_crytools_profile(profile)
     valid = set(valid_object_names)
-    missing = tuple(ref for ref in references if ref not in valid)
+    missing = tuple(
+        ref
+        for ref in references
+        if ref not in valid and not (target.key == CRYSIS1 and detect_crysis1_lod_level(ref))
+    )
     return PiecesValidation(references=references, missing=missing)
 
 
@@ -252,18 +356,27 @@ def _format_option_value(value: object) -> str:
 
 
 __all__ = [
+    "CRYSIS1",
+    "CRYSIS2",
+    "CRYSIS3",
+    "CRYTOOLS_PROFILES",
     "CRYEXPORT_NODE_PREFIX",
+    "CRYEXPORT_NODE_SUFFIX",
     "CRYSIS2_EXPORT_OPTIONS_KEY",
     "CRYSIS2_OBJECT_PROPERTIES_KEY",
     "CRYSIS2_PHYSICALIZE_KEY",
+    "CryToolsProfile",
     "MaterialIdInfo",
     "MaterialIdSummary",
     "PHYSICALIZE_LABELS",
     "PiecesValidation",
     "cryexport_node_name_from_filename",
+    "detect_crysis1_lod_level",
     "export_filename_stem",
     "extract_cryexport_node_suffix",
     "format_export_options",
+    "get_crytools_profile",
+    "is_crysis1_piece_child",
     "is_cryexport_node_name",
     "is_excluded_node_name",
     "is_valid_export_filename",
@@ -273,6 +386,7 @@ __all__ = [
     "parse_property_rows",
     "shape_key_summary",
     "skin_validation_summary",
+    "suggest_crysis1_lod_name",
     "summarize_material_ids",
     "validate_pieces_references",
 ]

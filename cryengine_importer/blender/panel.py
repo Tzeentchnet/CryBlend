@@ -59,8 +59,10 @@ from .asset_metadata import (
 from .crysis3_tools import (
     CRYSIS3_METADATA_KEY,
     apply_crysis3_settings,
+    audit_crytools_asset,
     audit_crysis3_asset,
     format_attachment_xml,
+    format_crytools_audit_report,
     format_crysis3_audit_report,
     metadata_to_udp_lines,
     metadata_value_matches,
@@ -68,19 +70,27 @@ from .crysis3_tools import (
     serialize_metadata,
 )
 from .crysis2_tools import (
+    CRYSIS1,
+    CRYSIS2,
+    CRYSIS3,
+    CRYTOOLS_PROFILES,
     CRYSIS2_EXPORT_OPTIONS_KEY,
     CRYSIS2_OBJECT_PROPERTIES_KEY,
     CRYSIS2_PHYSICALIZE_KEY,
     PHYSICALIZE_LABELS,
     cryexport_node_name_from_filename,
+    detect_crysis1_lod_level,
     export_filename_stem,
     format_export_options,
+    get_crytools_profile,
+    is_crysis1_piece_child,
     is_cryexport_node_name,
     is_excluded_node_name,
     is_valid_export_filename,
     parse_property_rows,
     shape_key_summary,
     skin_validation_summary,
+    suggest_crysis1_lod_name,
     summarize_material_ids,
     validate_pieces_references,
 )
@@ -141,6 +151,10 @@ def _tint_key(node) -> str:
 
 def _placeholder_material_name_pattern(obj_name: str) -> str:
     return f"{obj_name}_mat"
+
+
+def _selected_crytools_profile(props):
+    return get_crytools_profile(getattr(props, "crytools_target_profile", CRYSIS2))
 
 
 # ====================================================== general panel
@@ -449,8 +463,10 @@ class VIEW3D_PT_cryblend_crysis3_tools(Panel):
     def draw(self, context):
         layout = self.layout
         props = context.scene.cryblend_panel_props
+        profile = _selected_crytools_profile(props)
         selected = list(context.selected_objects or [])
 
+        layout.prop(props, "crytools_target_profile", text="Target")
         layout.label(text=f"Selected: {len(selected)}", icon="RESTRICT_SELECT_OFF")
         active = context.active_object
         if active is not None:
@@ -534,7 +550,7 @@ class VIEW3D_PT_cryblend_crysis3_tools(Panel):
         layout.separator()
         layout.operator(
             "cryblend.audit_c3_asset",
-            text="Audit C3 Asset",
+            text=f"Audit {profile.display_label} Asset",
             icon="CHECKMARK",
         )
         report = props.c3_audit_report.strip()
@@ -566,9 +582,13 @@ class VIEW3D_PT_cryblend_crysis2_tools(Panel):
     def draw(self, context):
         layout = self.layout
         props = context.scene.cryblend_panel_props
+        profile = _selected_crytools_profile(props)
         coll = _active_collection(context)
         objects = list(getattr(coll, "all_objects", coll.objects))
         names = [obj.name for obj in objects]
+
+        layout.prop(props, "crytools_target_profile", text="Target")
+        layout.label(text=f"Skin limit: {profile.max_skin_influences} influences", icon="MOD_ARMATURE")
 
         materials = _materials_in_collection(coll)
         mat_summary = summarize_material_ids([mat.name for mat in materials])
@@ -595,14 +615,14 @@ class VIEW3D_PT_cryblend_crysis2_tools(Panel):
         stem = export_filename_stem(props.c2_export_filename)
         icon = "CHECKMARK" if is_valid_export_filename(stem) else "ERROR"
         box.label(text=f"Stem: {stem or '(empty)'}", icon=icon)
-        export_nodes = [obj.name for obj in objects if is_cryexport_node_name(obj.name)]
+        export_nodes = [obj.name for obj in objects if is_cryexport_node_name(obj.name, profile=profile)]
         export_nodes.extend(
-            child.name for child in getattr(coll, "children", []) if is_cryexport_node_name(child.name)
+            child.name for child in getattr(coll, "children", []) if is_cryexport_node_name(child.name, profile=profile)
         )
         if export_nodes:
             box.label(text="Nodes: " + ", ".join(export_nodes[:3]))
         else:
-            box.label(text="No CryExportNode_* marker found.", icon="INFO")
+            box.label(text=f"No {profile.display_label} export marker found.", icon="INFO")
         box.operator("cryblend.create_c2_export_node", text="Create/Update Export Node", icon="EMPTY_AXIS")
 
         layout.separator()
@@ -611,9 +631,17 @@ class VIEW3D_PT_cryblend_crysis2_tools(Panel):
         col.prop(props, "c2_do_not_merge", text="DoNotMerge")
         col.prop(props, "c2_object_properties", text="Rows")
         selected = list(context.selected_objects or [])
-        pieces = validate_pieces_references(props.c2_object_properties, names)
+        pieces = validate_pieces_references(props.c2_object_properties, names, profile=profile)
         if pieces.missing:
             col.label(text="Missing pieces: " + ", ".join(pieces.missing[:4]), icon="ERROR")
+        if profile.key == CRYSIS1:
+            lod_names = [obj.name for obj in objects if detect_crysis1_lod_level(obj.name)]
+            piece_names = [obj.name for obj in objects if is_crysis1_piece_child(obj.name)]
+            if lod_names:
+                col.label(text=f"Legacy LOD markers: {len(lod_names)}", icon="INFO")
+                col.label(text=suggest_crysis1_lod_name(lod_names[0])[:120])
+            if piece_names:
+                col.label(text=f"Breakable -piece children: {len(piece_names)}", icon="INFO")
         excluded = [obj.name for obj in objects if is_excluded_node_name(obj.name)]
         if excluded:
             col.label(text=f"Excluded by _: {len(excluded)}", icon="INFO")
@@ -637,7 +665,7 @@ class VIEW3D_PT_cryblend_crysis2_tools(Panel):
         layout.separator()
         skin_box = layout.box()
         skin_box.label(text="Skin & Morph Validation", icon="ARMATURE_DATA")
-        for line in _c2_skin_report(coll)[:6]:
+        for line in _c2_skin_report(coll, profile=profile)[:6]:
             skin_box.label(text=line)
         morph_lines = _c2_shape_key_report(coll)
         for line in morph_lines[:5]:
@@ -1174,7 +1202,7 @@ def _c3_degenerate_face_count(mesh) -> int:
     return count
 
 
-def _c3_weight_stats(obj) -> tuple[bool, int, int]:
+def _c3_weight_stats(obj, *, max_skin_influences: int = 8) -> tuple[bool, int, int]:
     bad_totals = 0
     too_many = 0
     weighted = False
@@ -1186,7 +1214,7 @@ def _c3_weight_stats(obj) -> tuple[bool, int, int]:
         weighted = True
         if abs(sum(weights) - 1.0) > 0.001:
             bad_totals += 1
-        if len(weights) > 8:
+        if len(weights) > max_skin_influences:
             too_many += 1
     return weighted, bad_totals, too_many
 
@@ -1201,7 +1229,13 @@ def _c3_descendants(obj, children_by_parent: dict[int, list]) -> list:
     return out
 
 
-def _collect_c3_audit_records(context, coll) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _collect_c3_audit_records(
+    context,
+    coll,
+    *,
+    profile=None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    target = get_crytools_profile(profile or CRYSIS3)
     objects = list(getattr(coll, "all_objects", coll.objects))
     children_by_parent: dict[int, list] = {}
     for obj in objects:
@@ -1212,7 +1246,10 @@ def _collect_c3_audit_records(context, coll) -> tuple[list[dict[str, Any]], list
     records: list[dict[str, Any]] = []
     for obj in objects:
         data = getattr(obj, "data", None)
-        weighted, bad_totals, too_many = _c3_weight_stats(obj)
+        weighted, bad_totals, too_many = _c3_weight_stats(
+            obj,
+            max_skin_influences=target.max_skin_influences,
+        )
         descendants = _c3_descendants(obj, children_by_parent)
         has_armature = any(getattr(mod, "type", "") == "ARMATURE" for mod in obj.modifiers)
         records.append(
@@ -1277,23 +1314,30 @@ class CRYBLEND_OT_audit_c3_asset(Operator):
             self.report({"ERROR"}, "No active CryBlend collection")
             return {"CANCELLED"}
 
-        object_records, material_records = _collect_c3_audit_records(context, coll)
+        props = context.scene.cryblend_panel_props
+        profile = _selected_crytools_profile(props)
+        object_records, material_records = _collect_c3_audit_records(
+            context,
+            coll,
+            profile=profile,
+        )
         render = context.scene.render
         fps = float(render.fps) / float(render.fps_base or 1.0)
-        issues = audit_crysis3_asset(
+        issues = audit_crytools_asset(
             object_records,
             material_records,
+            profile=profile,
             fps=fps,
             unit_system=context.scene.unit_settings.system,
         )
-        report = format_crysis3_audit_report(issues)
-        context.scene.cryblend_panel_props.c3_audit_report = report
+        report = format_crytools_audit_report(issues, profile=profile)
+        props.c3_audit_report = report
         context.window_manager.clipboard = report
         errors = sum(1 for issue in issues if issue.severity == "error")
         warnings = sum(1 for issue in issues if issue.severity == "warning")
         self.report(
             {"ERROR" if errors else "WARNING" if warnings else "INFO"},
-            f"C3 audit: {errors} error(s), {warnings} warning(s). Report copied.",
+            f"{profile.display_label} audit: {errors} error(s), {warnings} warning(s). Report copied.",
         )
         return {"FINISHED"}
 
@@ -1347,11 +1391,12 @@ class CRYBLEND_OT_create_c2_export_node(Operator):
             self.report({"ERROR"}, "No active CryBlend collection")
             return {"CANCELLED"}
         props = context.scene.cryblend_panel_props
+        profile = _selected_crytools_profile(props)
         stem = export_filename_stem(props.c2_export_filename) or coll.name
         if not is_valid_export_filename(stem):
             self.report({"ERROR"}, "Export filename must use letters, numbers, and underscores")
             return {"CANCELLED"}
-        node_name = cryexport_node_name_from_filename(stem)
+        node_name = cryexport_node_name_from_filename(stem, profile=profile)
         active = context.active_object
         if active is not None and active.type == "EMPTY" and active.name in {obj.name for obj in coll.all_objects}:
             active.name = node_name
@@ -1363,7 +1408,7 @@ class CRYBLEND_OT_create_c2_export_node(Operator):
             target.empty_display_size = 1.0
             coll.objects.link(target)
             target[CRYSIS2_EXPORT_OPTIONS_KEY] = _c2_export_options_text(props)
-        self.report({"INFO"}, f"Tagged {target.name} as a Crysis 2 export node.")
+        self.report({"INFO"}, f"Tagged {target.name} as a {profile.display_label} export node.")
         return {"FINISHED"}
 
 
@@ -1682,12 +1727,14 @@ def _c2_export_options_text(props) -> str:
     return format_export_options(options)
 
 
-def _c2_skin_report(coll) -> list[str]:
+def _c2_skin_report(coll, *, profile=None) -> list[str]:
+    target = get_crytools_profile(profile or CRYSIS2)
     meshes = [obj for obj in coll.all_objects if obj.type == "MESH"]
     meshes_without_armature = 0
     missing_armatures = 0
     unweighted_vertices = 0
     non_normalized_vertices = 0
+    too_many_influences = 0
     skeleton_roots: set[str] = set()
 
     for obj in meshes:
@@ -1714,8 +1761,10 @@ def _c2_skin_report(coll) -> list[str]:
                 unweighted_vertices += 1
             elif abs(total - 1.0) > 0.01:
                 non_normalized_vertices += 1
+            if len([weight for weight in weights if weight > 0.0]) > target.max_skin_influences:
+                too_many_influences += 1
 
-    return skin_validation_summary(
+    lines = skin_validation_summary(
         mesh_count=len(meshes),
         meshes_without_armature=meshes_without_armature,
         missing_armature_objects=missing_armatures,
@@ -1723,6 +1772,11 @@ def _c2_skin_report(coll) -> list[str]:
         non_normalized_vertices=non_normalized_vertices,
         skeleton_roots=sorted(skeleton_roots),
     )
+    if too_many_influences:
+        lines.append(
+            f"Vertices over {target.max_skin_influences} influences: {too_many_influences}"
+        )
+    return lines
 
 
 def _c2_shape_key_report(coll) -> list[str]:
@@ -1750,6 +1804,14 @@ def _c2_shape_key_report(coll) -> list[str]:
 
 
 class CryBlendPanelProps(bpy.types.PropertyGroup):
+    crytools_target_profile: EnumProperty(  # type: ignore[valid-type]
+        name="Target",
+        items=tuple(
+            (key, profile.display_label, profile.rc_note)
+            for key, profile in CRYTOOLS_PROFILES.items()
+        ),
+        default=CRYSIS2,
+    )
     helper_display_type: EnumProperty(  # type: ignore[valid-type]
         name="Helper Display",
         items=(

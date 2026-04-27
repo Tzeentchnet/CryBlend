@@ -8,6 +8,8 @@ Status: **work in progress** — see [roadmap.md](roadmap.md) for the
 phased implementation plan and [changelog.md](changelog.md) for what
 has shipped.
 
+Current extension version: **0.1.3** (`dist/cryengine_importer-0.1.3.zip`).
+
 ## Installation
 
 ### From a release zip
@@ -132,16 +134,24 @@ import. It contains eight sub-panels:
   switcher (PLAIN_AXES / ARROWS / CONE / CUBE / SPHERE) with size
   control for selected empties.
 - **Crysis 2 Tools** — validation and metadata helpers adapted from
-  the legacy XSI, Max, and Maya Crysis 2 toolchains, not ports of the
-  old exporter runtimes. The panel checks XSI-style material IDs
+  the legacy XSI, Max, and Maya CryTools toolchains, not ports of the
+  old exporter runtimes. A **Target** selector switches shared checks
+  between Crysis 1 / CryEngine 2, Crysis 2, and Crysis 3 profiles so
+  export-node names, skin influence limits, LOD/piece wording, and
+  report text match the intended game. The panel checks XSI-style material IDs
   (`_<ID>_<Name>`) for duplicates, gaps, and the 0-31 range; stores
   physicalization labels (`Default`, `ProxyNoDraw`, `NoCollide`,
-  `Obstruct`) on materials; creates or updates `CryExportNode_*`
+  `Obstruct`) on materials; creates or updates Crysis 1
+  `<stem>_CryExportNode` or later `CryExportNode_<stem>` / `CryExport_<stem>`
   empties from export filenames using XSI-safe naming rules; flags
   Max-style `_` excluded objects; validates `pieces=...` references
-  in object property rows; stores Maya-style animation export option
-  metadata on the collection; and reports Blender-native skin and
-  shape-key findings for export planning.
+  in object property rows; detects Crysis 1 `-LOD1-` through `-LOD4-`
+  names and suggests `_LOD1_` through `_LOD4_` normalization; stores
+  Maya-style animation export option metadata on the collection; and
+  reports Blender-native skin and shape-key findings for export
+  planning. Crysis 1 / CE2 reports call out the legacy
+  `/skipmateriallibrarycreation` Resource Compiler convention but do
+  not invoke RC.
 - **Crysis 3 Tools** — game-specific artist helpers adapted from
   CryTools-era Max/Maya workflows. Apply CGF metadata tags to the
   selected objects (`mass`, `density`, force primitives, joint
@@ -151,14 +161,16 @@ import. It contains eight sub-panels:
   select objects in the imported collection by numeric metadata
   comparisons, copy CryEngine attachment-helper XML for selected
   helpers to the clipboard, reset selected/all camera pivot offsets,
-  and run **Audit C3 Asset**. The audit mirrors practical checks from
-  the CryEngine 3 Max, Maya, and XSI exporters: CryExport root
-  presence, export type / filename validity, empty export roots,
-  duplicate export names, mesh UV and colour-set counts, degenerate
-  faces, non-uniform scale, CHR/SKIN skeleton presence, skin-weight
-  normalization, the 8-influence limit, material ID duplicates / gaps,
-  and known physicalization surface names. The panel previews the
-  first findings and copies the full report to the clipboard.
+  and run the target-aware asset audit. The audit mirrors practical
+  checks from the CryEngine Max, Maya, and XSI exporters: CryExport
+  root presence and naming, export type / filename validity where the
+  profile expects it, empty export roots, duplicate export names, mesh
+  UV and colour-set counts, degenerate faces, non-uniform scale,
+  CHR/SKIN skeleton presence, skin-weight normalization, profile skin
+  influence limits (5 for Crysis 1 / CE2 and Crysis 2, 8 for Crysis
+  3), material ID duplicates / gaps, and known physicalization surface
+  names. The panel previews the first findings and copies the full
+  report to the clipboard.
 - **Animation** *(only when the collection has an armature)* —
   list every action, **Set Active** / **Push to NLA** per row,
   and **Import Extra Clip…** for adding a `.caf` / `.anim` / `.cal`
@@ -181,6 +193,9 @@ python scripts/build_extension.py
 # Clean dist/ first and validate with Blender if it's on PATH:
 python scripts/build_extension.py --clean --validate
 ```
+
+For version **0.1.3**, the local build artifact is
+`dist/cryengine_importer-0.1.3.zip`.
 
 ## Development
 

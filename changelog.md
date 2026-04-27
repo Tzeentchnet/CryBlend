@@ -11,6 +11,15 @@ The upstream C# converter is tracked separately at
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-04-26
+
+### Added
+
+- Added profile-aware CryTools audit/export helpers for Crysis 1 /
+  CryEngine 2, Crysis 2, and Crysis 3, including target-specific
+  CryExport node naming, skin influence limits, Crysis 1 LOD/piece
+  checks, and profile-aware audit report titles.
+
 ## [0.1.2] — 2026-04-19
 
 ### Added

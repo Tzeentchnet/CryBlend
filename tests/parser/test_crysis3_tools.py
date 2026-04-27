@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from cryengine_importer.blender.crysis2_tools import CRYSIS1, CRYSIS3
 from cryengine_importer.blender.crysis3_tools import (
+    audit_crytools_asset,
     audit_crysis3_asset,
     apply_crysis3_settings,
     format_attachment_xml,
+    format_crytools_audit_report,
     format_crysis3_audit_report,
     metadata_to_udp_lines,
     metadata_value_matches,
@@ -184,3 +187,38 @@ def test_format_crysis3_audit_report_summarizes_findings() -> None:
     )
     report = format_crysis3_audit_report(issues)
     assert report == "Crysis 3 Asset Audit\nNo issues found."
+
+
+def test_profile_audit_uses_c1_export_node_and_skin_limits() -> None:
+    issues = audit_crytools_asset(
+        [
+            {
+                "name": "truck_CryExportNode",
+                "type": "EMPTY",
+                "child_count": 1,
+            },
+            {
+                "name": "truck-LOD2-hull-piece01",
+                "type": "MESH",
+                "vertices": 8,
+                "faces": 4,
+                "uv_layers": 1,
+                "is_skinned": True,
+                "has_armature": True,
+                "too_many_influences": 1,
+            },
+        ],
+        profile=CRYSIS1,
+        fps=30,
+    )
+    codes = {issue.code for issue in issues}
+    assert "export-root-type-missing" not in codes
+    assert "c1-lod-marker" in codes
+    assert "c1-breakable-piece" in codes
+    assert "skin-too-many-influences" in codes
+    assert any("5-influence" in issue.message for issue in issues)
+
+
+def test_profile_report_title_uses_target_label() -> None:
+    assert format_crytools_audit_report([], profile=CRYSIS1) == "Crysis 1 / CE2 Asset Audit\nNo issues found."
+    assert format_crytools_audit_report([], profile=CRYSIS3) == "Crysis 3 Asset Audit\nNo issues found."
