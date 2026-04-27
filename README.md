@@ -99,7 +99,7 @@ without going back through File → Import.
 
 The panel is context-sensitive: it activates whenever the active
 collection (or one of its ancestors) was produced by a CryBlend
-import. It contains six sub-panels:
+import. It contains eight sub-panels:
 
 - **General** — source path, axis settings, and a one-click
   **Re-import** that re-runs the importer with the cached settings
@@ -131,6 +131,34 @@ import. It contains six sub-panels:
   passive collision shapes activate), and a bulk helper-display
   switcher (PLAIN_AXES / ARROWS / CONE / CUBE / SPHERE) with size
   control for selected empties.
+- **Crysis 2 Tools** — validation and metadata helpers adapted from
+  the legacy XSI, Max, and Maya Crysis 2 toolchains, not ports of the
+  old exporter runtimes. The panel checks XSI-style material IDs
+  (`_<ID>_<Name>`) for duplicates, gaps, and the 0-31 range; stores
+  physicalization labels (`Default`, `ProxyNoDraw`, `NoCollide`,
+  `Obstruct`) on materials; creates or updates `CryExportNode_*`
+  empties from export filenames using XSI-safe naming rules; flags
+  Max-style `_` excluded objects; validates `pieces=...` references
+  in object property rows; stores Maya-style animation export option
+  metadata on the collection; and reports Blender-native skin and
+  shape-key findings for export planning.
+- **Crysis 3 Tools** — game-specific artist helpers adapted from
+  CryTools-era Max/Maya workflows. Apply CGF metadata tags to the
+  selected objects (`mass`, `density`, force primitives, joint
+  `limit` / `twist` / `bend` / `pull` / `push` / `shift`, destroyable
+  `Main` / `Remain`, `entity`, `rotaxes`, `sizevar`, and `generic`),
+  inspect the active object's tags in the legacy UDP text style,
+  select objects in the imported collection by numeric metadata
+  comparisons, copy CryEngine attachment-helper XML for selected
+  helpers to the clipboard, reset selected/all camera pivot offsets,
+  and run **Audit C3 Asset**. The audit mirrors practical checks from
+  the CryEngine 3 Max, Maya, and XSI exporters: CryExport root
+  presence, export type / filename validity, empty export roots,
+  duplicate export names, mesh UV and colour-set counts, degenerate
+  faces, non-uniform scale, CHR/SKIN skeleton presence, skin-weight
+  normalization, the 8-influence limit, material ID duplicates / gaps,
+  and known physicalization surface names. The panel previews the
+  first findings and copies the full report to the clipboard.
 - **Animation** *(only when the collection has an armature)* —
   list every action, **Set Active** / **Push to NLA** per row,
   and **Import Extra Clip…** for adding a `.caf` / `.anim` / `.cal`

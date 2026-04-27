@@ -33,6 +33,7 @@ from bpy.props import (  # type: ignore[import-not-found]
     BoolProperty,
     EnumProperty,
     FloatProperty,
+    IntProperty,
     StringProperty,
 )
 from bpy.types import Operator, Panel  # type: ignore[import-not-found]
@@ -54,6 +55,34 @@ from .asset_metadata import (
     find_active_cryblend_collection,
     read_metadata,
     stamp_collection,
+)
+from .crysis3_tools import (
+    CRYSIS3_METADATA_KEY,
+    apply_crysis3_settings,
+    audit_crysis3_asset,
+    format_attachment_xml,
+    format_crysis3_audit_report,
+    metadata_to_udp_lines,
+    metadata_value_matches,
+    parse_metadata_text,
+    serialize_metadata,
+)
+from .crysis2_tools import (
+    CRYSIS2_EXPORT_OPTIONS_KEY,
+    CRYSIS2_OBJECT_PROPERTIES_KEY,
+    CRYSIS2_PHYSICALIZE_KEY,
+    PHYSICALIZE_LABELS,
+    cryexport_node_name_from_filename,
+    export_filename_stem,
+    format_export_options,
+    is_cryexport_node_name,
+    is_excluded_node_name,
+    is_valid_export_filename,
+    parse_property_rows,
+    shape_key_summary,
+    skin_validation_summary,
+    summarize_material_ids,
+    validate_pieces_references,
 )
 from .texture_audit import (
     find_missing_images,
@@ -399,6 +428,221 @@ class VIEW3D_PT_cryblend_physics(Panel):
             text="Apply to Selected Empties",
             icon="EMPTY_DATA",
         )
+
+
+# ==================================================== Crysis 3 tools panel
+
+
+class VIEW3D_PT_cryblend_crysis3_tools(Panel):
+    bl_idname = "VIEW3D_PT_cryblend_crysis3_tools"
+    bl_label = "Crysis 3 Tools"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "CryBlend"
+    bl_parent_id = "VIEW3D_PT_cryblend"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_collection(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.cryblend_panel_props
+        selected = list(context.selected_objects or [])
+
+        layout.label(text=f"Selected: {len(selected)}", icon="RESTRICT_SELECT_OFF")
+        active = context.active_object
+        if active is not None:
+            metadata = parse_metadata_text(active.get(CRYSIS3_METADATA_KEY, ""))
+            udp_lines = metadata_to_udp_lines(metadata)
+            box = layout.box()
+            box.label(text=f"Active: {active.name}", icon="OBJECT_DATA")
+            if udp_lines:
+                for line in udp_lines[:8]:
+                    box.label(text=line)
+                if len(udp_lines) > 8:
+                    box.label(text=f"... and {len(udp_lines) - 8} more")
+            else:
+                box.label(text="No Crysis 3 metadata tags.", icon="INFO")
+
+        col = layout.column(align=True)
+        col.label(text="Physics Metadata:")
+        row = col.row(align=True)
+        row.prop(props, "c3_use_mass", text="Mass")
+        mass = row.row(align=True)
+        mass.enabled = props.c3_use_mass
+        mass.prop(props, "c3_mass", text="")
+        row = col.row(align=True)
+        row.prop(props, "c3_use_density", text="Density")
+        density = row.row(align=True)
+        density.enabled = props.c3_use_density
+        density.prop(props, "c3_density", text="")
+        col.prop(props, "c3_primitive", text="Primitive")
+
+        col = layout.column(align=True)
+        col.label(text="Joint Properties:")
+        col.prop(props, "c3_use_joint", text="Enable")
+        joint = col.column(align=True)
+        joint.enabled = props.c3_use_joint
+        joint.prop(props, "c3_joint_limit", text="Limit")
+        joint.prop(props, "c3_joint_twist", text="Twist")
+        joint.prop(props, "c3_joint_bend", text="Bend")
+        joint.prop(props, "c3_joint_pull", text="Pull")
+        joint.prop(props, "c3_joint_push", text="Push")
+        joint.prop(props, "c3_joint_shift", text="Shift")
+
+        col = layout.column(align=True)
+        col.label(text="Destroyable Objects:")
+        col.prop(props, "c3_object_role", text="Role")
+        col.prop(props, "c3_entity", text="Entity")
+        col.prop(props, "c3_rotaxes", text="Rot Axes")
+        col.prop(props, "c3_sizevar", text="Size Var")
+        col.prop(props, "c3_generic", text="Generic")
+        layout.operator(
+            "cryblend.apply_c3_metadata",
+            text="Apply Metadata to Selected",
+            icon="PROPERTIES",
+        )
+
+        layout.separator()
+        col = layout.column(align=True)
+        col.label(text="Select Matching Metadata:")
+        row = col.row(align=True)
+        row.prop(props, "c3_match_key", text="")
+        row.prop(props, "c3_match_comparator", text="")
+        row.prop(props, "c3_match_value", text="")
+        layout.operator(
+            "cryblend.select_c3_metadata",
+            text="Select Matches in Collection",
+            icon="VIEWZOOM",
+        )
+
+        layout.separator()
+        row = layout.row(align=True)
+        row.operator(
+            "cryblend.copy_c3_attachment_xml",
+            text="Copy Attachment XML",
+            icon="COPYDOWN",
+        )
+        row.operator(
+            "cryblend.reset_camera_pivots",
+            text="Reset Camera Pivots",
+            icon="CAMERA_DATA",
+        )
+
+        layout.separator()
+        layout.operator(
+            "cryblend.audit_c3_asset",
+            text="Audit C3 Asset",
+            icon="CHECKMARK",
+        )
+        report = props.c3_audit_report.strip()
+        if report:
+            box = layout.box()
+            for line in report.splitlines()[:8]:
+                icon = "ERROR" if "[ERROR]" in line else "INFO"
+                box.label(text=line[:120], icon=icon)
+            if len(report.splitlines()) > 8:
+                box.label(text="Full report copied to clipboard.", icon="COPYDOWN")
+
+
+# ==================================================== Crysis 2 tools panel
+
+
+class VIEW3D_PT_cryblend_crysis2_tools(Panel):
+    bl_idname = "VIEW3D_PT_cryblend_crysis2_tools"
+    bl_label = "Crysis 2 Tools"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "CryBlend"
+    bl_parent_id = "VIEW3D_PT_cryblend"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_collection(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.cryblend_panel_props
+        coll = _active_collection(context)
+        objects = list(getattr(coll, "all_objects", coll.objects))
+        names = [obj.name for obj in objects]
+
+        materials = _materials_in_collection(coll)
+        mat_summary = summarize_material_ids([mat.name for mat in materials])
+        box = layout.box()
+        box.label(text=f"Material IDs: {len(materials)}", icon="MATERIAL")
+        if mat_summary.missing_ids:
+            box.label(text=f"Missing ID names: {len(mat_summary.missing_ids)}", icon="ERROR")
+        if mat_summary.out_of_range:
+            box.label(text=f"Outside 0-31: {len(mat_summary.out_of_range)}", icon="ERROR")
+        if mat_summary.duplicate_ids:
+            box.label(text="Duplicate IDs: " + ", ".join(map(str, mat_summary.duplicate_ids)), icon="ERROR")
+        if mat_summary.holes:
+            box.label(text="ID holes: " + ", ".join(map(str, mat_summary.holes[:12])), icon="INFO")
+        if not any((mat_summary.missing_ids, mat_summary.out_of_range, mat_summary.duplicate_ids, mat_summary.holes)):
+            box.label(text="Material ID layout is contiguous and in range.", icon="CHECKMARK")
+        row = box.row(align=True)
+        row.prop(props, "c2_physicalize", text="Physicalize")
+        row.operator("cryblend.apply_c2_material_physicalize", text="", icon="CHECKMARK")
+
+        layout.separator()
+        box = layout.box()
+        box.label(text="CryExport Node", icon="OUTLINER_OB_EMPTY")
+        box.prop(props, "c2_export_filename", text="Filename")
+        stem = export_filename_stem(props.c2_export_filename)
+        icon = "CHECKMARK" if is_valid_export_filename(stem) else "ERROR"
+        box.label(text=f"Stem: {stem or '(empty)'}", icon=icon)
+        export_nodes = [obj.name for obj in objects if is_cryexport_node_name(obj.name)]
+        export_nodes.extend(
+            child.name for child in getattr(coll, "children", []) if is_cryexport_node_name(child.name)
+        )
+        if export_nodes:
+            box.label(text="Nodes: " + ", ".join(export_nodes[:3]))
+        else:
+            box.label(text="No CryExportNode_* marker found.", icon="INFO")
+        box.operator("cryblend.create_c2_export_node", text="Create/Update Export Node", icon="EMPTY_AXIS")
+
+        layout.separator()
+        col = layout.column(align=True)
+        col.label(text="Object Properties:")
+        col.prop(props, "c2_do_not_merge", text="DoNotMerge")
+        col.prop(props, "c2_object_properties", text="Rows")
+        selected = list(context.selected_objects or [])
+        pieces = validate_pieces_references(props.c2_object_properties, names)
+        if pieces.missing:
+            col.label(text="Missing pieces: " + ", ".join(pieces.missing[:4]), icon="ERROR")
+        excluded = [obj.name for obj in objects if is_excluded_node_name(obj.name)]
+        if excluded:
+            col.label(text=f"Excluded by _: {len(excluded)}", icon="INFO")
+        col.operator("cryblend.apply_c2_object_properties", text=f"Apply to Selected ({len(selected)})", icon="PROPERTIES")
+
+        layout.separator()
+        col = layout.column(align=True)
+        col.label(text="Animation Export Options:")
+        col.prop(props, "c2_animation_sample_step", text="Sample Step")
+        col.prop(props, "c2_key_optimization", text="Key Optimization")
+        col.prop(props, "c2_rotation_precision", text="Rotation Precision")
+        col.prop(props, "c2_position_precision", text="Position Precision")
+        col.prop(props, "c2_manual_range", text="Manual Range")
+        range_col = col.column(align=True)
+        range_col.enabled = props.c2_manual_range
+        row = range_col.row(align=True)
+        row.prop(props, "c2_manual_range_start", text="Start")
+        row.prop(props, "c2_manual_range_end", text="End")
+        col.operator("cryblend.apply_c2_export_options", text="Store Options on Collection", icon="OPTIONS")
+
+        layout.separator()
+        skin_box = layout.box()
+        skin_box.label(text="Skin & Morph Validation", icon="ARMATURE_DATA")
+        for line in _c2_skin_report(coll)[:6]:
+            skin_box.label(text=line)
+        morph_lines = _c2_shape_key_report(coll)
+        for line in morph_lines[:5]:
+            skin_box.label(text=line)
+        skin_box.operator("cryblend.copy_c2_shape_report", text="Copy Shape-Key Report", icon="COPYDOWN")
 
 
 # ======================================================= animation panel
@@ -804,6 +1048,386 @@ class CRYBLEND_OT_apply_helper_display(Operator):
         return {"FINISHED"}
 
 
+class CRYBLEND_OT_apply_c3_metadata(Operator):
+    """Apply Crysis 3 CGF metadata tags to selected objects."""
+
+    bl_idname = "cryblend.apply_c3_metadata"
+    bl_label = "Apply Crysis 3 Metadata"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        props = context.scene.cryblend_panel_props
+        targets = list(context.selected_objects or [])
+        if not targets:
+            self.report({"ERROR"}, "No objects selected")
+            return {"CANCELLED"}
+
+        settings = {
+            "use_mass": props.c3_use_mass,
+            "mass": props.c3_mass,
+            "use_density": props.c3_use_density,
+            "density": props.c3_density,
+            "primitive": props.c3_primitive,
+            "use_joint": props.c3_use_joint,
+            "limit": props.c3_joint_limit,
+            "twist": props.c3_joint_twist,
+            "bend": props.c3_joint_bend,
+            "pull": props.c3_joint_pull,
+            "push": props.c3_joint_push,
+            "shift": props.c3_joint_shift,
+            "entity": props.c3_entity,
+            "rotaxes": props.c3_rotaxes,
+            "sizevar": props.c3_sizevar,
+            "generic": props.c3_generic,
+        }
+        for obj in targets:
+            metadata = apply_crysis3_settings(
+                obj.get(CRYSIS3_METADATA_KEY, ""),
+                settings,
+            )
+            obj[CRYSIS3_METADATA_KEY] = serialize_metadata(metadata)
+            if props.c3_object_role == "MAIN":
+                obj.name = "Main"
+            elif props.c3_object_role == "REMAIN":
+                obj.name = "Remain"
+        self.report({"INFO"}, f"Applied Crysis 3 metadata to {len(targets)} object(s).")
+        return {"FINISHED"}
+
+
+class CRYBLEND_OT_select_c3_metadata(Operator):
+    """Select objects whose Crysis 3 metadata matches a numeric test."""
+
+    bl_idname = "cryblend.select_c3_metadata"
+    bl_label = "Select Crysis 3 Metadata Matches"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        coll = _active_collection(context)
+        if coll is None:
+            self.report({"ERROR"}, "No active CryBlend collection")
+            return {"CANCELLED"}
+        props = context.scene.cryblend_panel_props
+        matches = []
+        for obj in coll.all_objects:
+            if metadata_value_matches(
+                obj.get(CRYSIS3_METADATA_KEY, ""),
+                props.c3_match_key,
+                props.c3_match_comparator,
+                props.c3_match_value,
+            ):
+                matches.append(obj)
+        bpy.ops.object.select_all(action="DESELECT")
+        for obj in matches:
+            obj.select_set(True)
+        if matches:
+            context.view_layer.objects.active = matches[0]
+        self.report({"INFO"}, f"Selected {len(matches)} matching object(s).")
+        return {"FINISHED"}
+
+
+class CRYBLEND_OT_copy_c3_attachment_xml(Operator):
+    """Copy CryEngine attachment-helper XML for selected objects."""
+
+    bl_idname = "cryblend.copy_c3_attachment_xml"
+    bl_label = "Copy Crysis 3 Attachment XML"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        targets = list(context.selected_objects or [])
+        if not targets:
+            self.report({"ERROR"}, "No objects selected")
+            return {"CANCELLED"}
+        lines = ["======== Begin Attachment Helpers ========"]
+        for obj in targets:
+            quat = obj.rotation_euler.to_quaternion()
+            lines.append(
+                format_attachment_xml(
+                    obj.name,
+                    tuple(obj.location),
+                    (quat.w, quat.x, quat.y, quat.z),
+                )
+            )
+        lines.append("======== End Attachment Helpers ========")
+        context.window_manager.clipboard = "\n".join(lines)
+        self.report({"INFO"}, f"Copied {len(targets)} attachment helper(s).")
+        return {"FINISHED"}
+
+
+def _c3_material_value(material, *keys: str):
+    for key in keys:
+        try:
+            value = material.get(key)
+        except Exception:
+            value = None
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _c3_degenerate_face_count(mesh) -> int:
+    count = 0
+    for polygon in getattr(mesh, "polygons", ()):  # pragma: no branch - Blender data
+        vertices = tuple(getattr(polygon, "vertices", ()))
+        area = float(getattr(polygon, "area", 1.0) or 0.0)
+        if len(set(vertices)) < 3 or area <= 1.0e-10:
+            count += 1
+    return count
+
+
+def _c3_weight_stats(obj) -> tuple[bool, int, int]:
+    bad_totals = 0
+    too_many = 0
+    weighted = False
+    data = getattr(obj, "data", None)
+    for vertex in getattr(data, "vertices", ()):  # pragma: no branch - Blender data
+        weights = [g.weight for g in getattr(vertex, "groups", ()) if g.weight > 0.0]
+        if not weights:
+            continue
+        weighted = True
+        if abs(sum(weights) - 1.0) > 0.001:
+            bad_totals += 1
+        if len(weights) > 8:
+            too_many += 1
+    return weighted, bad_totals, too_many
+
+
+def _c3_descendants(obj, children_by_parent: dict[int, list]) -> list:
+    out = []
+    stack = list(children_by_parent.get(id(obj), ()))
+    while stack:
+        child = stack.pop()
+        out.append(child)
+        stack.extend(children_by_parent.get(id(child), ()))
+    return out
+
+
+def _collect_c3_audit_records(context, coll) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    objects = list(getattr(coll, "all_objects", coll.objects))
+    children_by_parent: dict[int, list] = {}
+    for obj in objects:
+        parent = getattr(obj, "parent", None)
+        if parent is not None:
+            children_by_parent.setdefault(id(parent), []).append(obj)
+
+    records: list[dict[str, Any]] = []
+    for obj in objects:
+        data = getattr(obj, "data", None)
+        weighted, bad_totals, too_many = _c3_weight_stats(obj)
+        descendants = _c3_descendants(obj, children_by_parent)
+        has_armature = any(getattr(mod, "type", "") == "ARMATURE" for mod in obj.modifiers)
+        records.append(
+            {
+                "name": obj.name,
+                "type": obj.type,
+                "export_type": obj.get("cryblend_c3_export_type", obj.get("c3_export_type", "")),
+                "filename": obj.get("cryblend_c3_filename", obj.get("c3_filename", "")),
+                "child_count": len(children_by_parent.get(id(obj), ())),
+                "vertices": len(getattr(data, "vertices", ())),
+                "faces": len(getattr(data, "polygons", ())),
+                "uv_layers": len(getattr(data, "uv_layers", ())),
+                "color_sets": len(getattr(data, "color_attributes", getattr(data, "vertex_colors", ()))),
+                "degenerate_faces": _c3_degenerate_face_count(data) if data else 0,
+                "vertices_without_uv": len(getattr(data, "vertices", ())) if data and not getattr(data, "uv_layers", ()) else 0,
+                "scale": tuple(obj.scale),
+                "is_skinned": weighted,
+                "has_armature": has_armature,
+                "has_skeleton": any(
+                    child.type == "ARMATURE"
+                    or any(getattr(mod, "type", "") == "ARMATURE" for mod in child.modifiers)
+                    for child in descendants
+                ),
+                "bad_weight_totals": bad_totals,
+                "too_many_influences": too_many,
+            }
+        )
+
+    material_records = []
+    for material in _materials_in_collection(coll):
+        material_records.append(
+            {
+                "name": material.name,
+                "material_id": _c3_material_value(
+                    material,
+                    "MaterialID",
+                    "material_id",
+                    "cryMaterialID",
+                    "cryblend_material_id",
+                ),
+                "physicalize": _c3_material_value(
+                    material,
+                    "physicalize",
+                    "Physicalize",
+                    CRYSIS2_PHYSICALIZE_KEY,
+                ),
+            }
+        )
+    return records, material_records
+
+
+class CRYBLEND_OT_audit_c3_asset(Operator):
+    """Run Crysis 3 asset checks inspired by Max/Maya/XSI CryTools."""
+
+    bl_idname = "cryblend.audit_c3_asset"
+    bl_label = "Audit Crysis 3 Asset"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        coll = _active_collection(context)
+        if coll is None:
+            self.report({"ERROR"}, "No active CryBlend collection")
+            return {"CANCELLED"}
+
+        object_records, material_records = _collect_c3_audit_records(context, coll)
+        render = context.scene.render
+        fps = float(render.fps) / float(render.fps_base or 1.0)
+        issues = audit_crysis3_asset(
+            object_records,
+            material_records,
+            fps=fps,
+            unit_system=context.scene.unit_settings.system,
+        )
+        report = format_crysis3_audit_report(issues)
+        context.scene.cryblend_panel_props.c3_audit_report = report
+        context.window_manager.clipboard = report
+        errors = sum(1 for issue in issues if issue.severity == "error")
+        warnings = sum(1 for issue in issues if issue.severity == "warning")
+        self.report(
+            {"ERROR" if errors else "WARNING" if warnings else "INFO"},
+            f"C3 audit: {errors} error(s), {warnings} warning(s). Report copied.",
+        )
+        return {"FINISHED"}
+
+
+class CRYBLEND_OT_reset_camera_pivots(Operator):
+    """Reset camera data offsets on selected cameras, or all cameras."""
+
+    bl_idname = "cryblend.reset_camera_pivots"
+    bl_label = "Reset Camera Pivots"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        selected = [obj for obj in context.selected_objects if obj.type == "CAMERA"]
+        cameras = selected or [obj for obj in bpy.data.objects if obj.type == "CAMERA"]
+        for obj in cameras:
+            data = obj.data
+            data.shift_x = 0.0
+            data.shift_y = 0.0
+        self.report({"INFO"}, f"Reset {len(cameras)} camera pivot offset(s).")
+        return {"FINISHED"}
+
+
+class CRYBLEND_OT_apply_c2_material_physicalize(Operator):
+    """Store a Crysis 2 physicalization label on the active material."""
+
+    bl_idname = "cryblend.apply_c2_material_physicalize"
+    bl_label = "Apply Crysis 2 Physicalize Label"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        obj = context.active_object
+        mat = obj.active_material if obj else None
+        if mat is None:
+            self.report({"ERROR"}, "No active material")
+            return {"CANCELLED"}
+        mat[CRYSIS2_PHYSICALIZE_KEY] = context.scene.cryblend_panel_props.c2_physicalize
+        self.report({"INFO"}, f"Stored Crysis 2 physicalize label on {mat.name}.")
+        return {"FINISHED"}
+
+
+class CRYBLEND_OT_create_c2_export_node(Operator):
+    """Create or update a CryExportNode marker for the active collection."""
+
+    bl_idname = "cryblend.create_c2_export_node"
+    bl_label = "Create Crysis 2 Export Node"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        coll = _active_collection(context)
+        if coll is None:
+            self.report({"ERROR"}, "No active CryBlend collection")
+            return {"CANCELLED"}
+        props = context.scene.cryblend_panel_props
+        stem = export_filename_stem(props.c2_export_filename) or coll.name
+        if not is_valid_export_filename(stem):
+            self.report({"ERROR"}, "Export filename must use letters, numbers, and underscores")
+            return {"CANCELLED"}
+        node_name = cryexport_node_name_from_filename(stem)
+        active = context.active_object
+        if active is not None and active.type == "EMPTY" and active.name in {obj.name for obj in coll.all_objects}:
+            active.name = node_name
+            active[CRYSIS2_EXPORT_OPTIONS_KEY] = _c2_export_options_text(props)
+            target = active
+        else:
+            target = bpy.data.objects.new(node_name, None)
+            target.empty_display_type = "CUBE"
+            target.empty_display_size = 1.0
+            coll.objects.link(target)
+            target[CRYSIS2_EXPORT_OPTIONS_KEY] = _c2_export_options_text(props)
+        self.report({"INFO"}, f"Tagged {target.name} as a Crysis 2 export node.")
+        return {"FINISHED"}
+
+
+class CRYBLEND_OT_apply_c2_object_properties(Operator):
+    """Apply portable Crysis 2 object-property rows to selected objects."""
+
+    bl_idname = "cryblend.apply_c2_object_properties"
+    bl_label = "Apply Crysis 2 Object Properties"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        targets = list(context.selected_objects or [])
+        if not targets:
+            self.report({"ERROR"}, "No objects selected")
+            return {"CANCELLED"}
+        props = context.scene.cryblend_panel_props
+        rows = parse_property_rows(props.c2_object_properties)
+        if props.c2_do_not_merge:
+            rows["DoNotMerge"] = "true"
+        text = "\n".join(
+            key if value == "true" else f"{key}={value}"
+            for key, value in rows.items()
+        )
+        for obj in targets:
+            obj[CRYSIS2_OBJECT_PROPERTIES_KEY] = text
+        self.report({"INFO"}, f"Applied Crysis 2 properties to {len(targets)} object(s).")
+        return {"FINISHED"}
+
+
+class CRYBLEND_OT_apply_c2_export_options(Operator):
+    """Store Crysis 2 animation/export option metadata on the collection."""
+
+    bl_idname = "cryblend.apply_c2_export_options"
+    bl_label = "Store Crysis 2 Export Options"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        coll = _active_collection(context)
+        if coll is None:
+            self.report({"ERROR"}, "No active CryBlend collection")
+            return {"CANCELLED"}
+        coll[CRYSIS2_EXPORT_OPTIONS_KEY] = _c2_export_options_text(context.scene.cryblend_panel_props)
+        self.report({"INFO"}, "Stored Crysis 2 export options on the collection.")
+        return {"FINISHED"}
+
+
+class CRYBLEND_OT_copy_c2_shape_report(Operator):
+    """Copy the Crysis 2 shape-key report for the active collection."""
+
+    bl_idname = "cryblend.copy_c2_shape_report"
+    bl_label = "Copy Crysis 2 Shape-Key Report"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        coll = _active_collection(context)
+        if coll is None:
+            self.report({"ERROR"}, "No active CryBlend collection")
+            return {"CANCELLED"}
+        lines = _c2_shape_key_report(coll)
+        context.window_manager.clipboard = "\n".join(lines)
+        self.report({"INFO"}, f"Copied {len(lines)} Crysis 2 shape-key report line(s).")
+        return {"FINISHED"}
+
+
 class CRYBLEND_OT_set_active_action(Operator):
     bl_idname = "cryblend.set_active_action"
     bl_label = "Set Active Action"
@@ -1045,6 +1669,83 @@ def _apply_tints_to_material(
     return n_applied, n_missing
 
 
+def _c2_export_options_text(props) -> str:
+    options = {
+        "animationSampleStep": props.c2_animation_sample_step,
+        "enableKeyOptimization": props.c2_key_optimization,
+        "rotationPrecision": props.c2_rotation_precision,
+        "positionPrecision": props.c2_position_precision,
+        "enableManualRange": props.c2_manual_range,
+        "manualRangeStart": props.c2_manual_range_start,
+        "manualRangeEnd": props.c2_manual_range_end,
+    }
+    return format_export_options(options)
+
+
+def _c2_skin_report(coll) -> list[str]:
+    meshes = [obj for obj in coll.all_objects if obj.type == "MESH"]
+    meshes_without_armature = 0
+    missing_armatures = 0
+    unweighted_vertices = 0
+    non_normalized_vertices = 0
+    skeleton_roots: set[str] = set()
+
+    for obj in meshes:
+        armature_mods = [mod for mod in getattr(obj, "modifiers", []) if mod.type == "ARMATURE"]
+        if not armature_mods:
+            meshes_without_armature += 1
+        for mod in armature_mods:
+            armature = getattr(mod, "object", None)
+            if armature is None:
+                missing_armatures += 1
+            elif getattr(armature, "type", "") == "ARMATURE":
+                roots = [bone.name for bone in armature.data.bones if bone.parent is None]
+                skeleton_roots.update(roots)
+
+        vertex_groups = list(getattr(obj, "vertex_groups", []))
+        group_names = {group.index: group.name for group in vertex_groups}
+        if not group_names:
+            unweighted_vertices += len(getattr(obj.data, "vertices", []))
+            continue
+        for vertex in getattr(obj.data, "vertices", []):
+            weights = [group.weight for group in vertex.groups if group.group in group_names]
+            total = sum(weights)
+            if total == 0.0:
+                unweighted_vertices += 1
+            elif abs(total - 1.0) > 0.01:
+                non_normalized_vertices += 1
+
+    return skin_validation_summary(
+        mesh_count=len(meshes),
+        meshes_without_armature=meshes_without_armature,
+        missing_armature_objects=missing_armatures,
+        unweighted_vertices=unweighted_vertices,
+        non_normalized_vertices=non_normalized_vertices,
+        skeleton_roots=sorted(skeleton_roots),
+    )
+
+
+def _c2_shape_key_report(coll) -> list[str]:
+    lines: list[str] = []
+    for obj in coll.all_objects:
+        if obj.type != "MESH":
+            continue
+        shape_keys = getattr(obj.data, "shape_keys", None)
+        if shape_keys is None:
+            continue
+        keys = list(getattr(shape_keys, "key_blocks", []))
+        if not keys:
+            continue
+        muted_or_zero = [
+            key.name
+            for key in keys
+            if key.name != "Basis"
+            and (getattr(key, "mute", False) or getattr(key, "value", 0.0) == 0.0)
+        ]
+        lines.extend(shape_key_summary(obj.name, [key.name for key in keys], muted_or_zero))
+    return lines or ["No shape keys found."]
+
+
 # ============================================================ scene props
 
 
@@ -1066,6 +1767,92 @@ class CryBlendPanelProps(bpy.types.PropertyGroup):
         min=0.001,
         max=100.0,
     )
+    c3_use_mass: BoolProperty(name="Mass", default=False)  # type: ignore[valid-type]
+    c3_mass: FloatProperty(name="Mass", default=0.0, min=0.0)  # type: ignore[valid-type]
+    c3_use_density: BoolProperty(name="Density", default=False)  # type: ignore[valid-type]
+    c3_density: FloatProperty(name="Density", default=0.0, min=0.0)  # type: ignore[valid-type]
+    c3_primitive: EnumProperty(  # type: ignore[valid-type]
+        name="Primitive",
+        items=(
+            ("NONE", "None", ""),
+            ("BOX", "Box", ""),
+            ("CYLINDER", "Cylinder", ""),
+            ("SPHERE", "Sphere", ""),
+            ("CAPSULE", "Capsule", ""),
+        ),
+        default="NONE",
+    )
+    c3_use_joint: BoolProperty(name="Joint", default=False)  # type: ignore[valid-type]
+    c3_joint_limit: FloatProperty(name="Limit", default=0.0)  # type: ignore[valid-type]
+    c3_joint_twist: FloatProperty(name="Twist", default=0.0)  # type: ignore[valid-type]
+    c3_joint_bend: FloatProperty(name="Bend", default=0.0)  # type: ignore[valid-type]
+    c3_joint_pull: FloatProperty(name="Pull", default=0.0)  # type: ignore[valid-type]
+    c3_joint_push: FloatProperty(name="Push", default=0.0)  # type: ignore[valid-type]
+    c3_joint_shift: FloatProperty(name="Shift", default=0.0)  # type: ignore[valid-type]
+    c3_object_role: EnumProperty(  # type: ignore[valid-type]
+        name="Role",
+        items=(
+            ("UNCHANGED", "Unchanged", ""),
+            ("MAIN", "Main", ""),
+            ("REMAIN", "Remain", ""),
+        ),
+        default="UNCHANGED",
+    )
+    c3_entity: BoolProperty(name="Entity", default=False)  # type: ignore[valid-type]
+    c3_rotaxes: EnumProperty(  # type: ignore[valid-type]
+        name="Rot Axes",
+        items=(
+            ("NONE", "None", ""),
+            ("X", "X", ""),
+            ("Y", "Y", ""),
+            ("Z", "Z", ""),
+            ("XY", "XY", ""),
+            ("XZ", "XZ", ""),
+            ("YZ", "YZ", ""),
+            ("XYZ", "XYZ", ""),
+        ),
+        default="NONE",
+    )
+    c3_sizevar: FloatProperty(name="Size Var", default=0.0, min=0.0)  # type: ignore[valid-type]
+    c3_generic: FloatProperty(name="Generic", default=0.0, min=0.0)  # type: ignore[valid-type]
+    c3_match_key: EnumProperty(  # type: ignore[valid-type]
+        name="Key",
+        items=(
+            ("mass", "mass", ""),
+            ("density", "density", ""),
+            ("limit", "limit", ""),
+            ("twist", "twist", ""),
+            ("bend", "bend", ""),
+            ("pull", "pull", ""),
+            ("push", "push", ""),
+            ("shift", "shift", ""),
+            ("sizevar", "sizevar", ""),
+            ("generic", "generic", ""),
+        ),
+        default="mass",
+    )
+    c3_match_comparator: EnumProperty(  # type: ignore[valid-type]
+        name="Compare",
+        items=(("=", "=", ""), (">", ">", ""), ("<", "<", "")),
+        default="=",
+    )
+    c3_match_value: FloatProperty(name="Value", default=0.0)  # type: ignore[valid-type]
+    c3_audit_report: StringProperty(name="Audit Report", default="")  # type: ignore[valid-type]
+    c2_export_filename: StringProperty(name="Filename", default="export_node.cgf")  # type: ignore[valid-type]
+    c2_physicalize: EnumProperty(  # type: ignore[valid-type]
+        name="Physicalize",
+        items=tuple((label, label, "") for label in PHYSICALIZE_LABELS),
+        default="Default",
+    )
+    c2_do_not_merge: BoolProperty(name="DoNotMerge", default=False)  # type: ignore[valid-type]
+    c2_object_properties: StringProperty(name="Object Properties", default="")  # type: ignore[valid-type]
+    c2_animation_sample_step: FloatProperty(name="Sample Step", default=1.0, min=0.001)  # type: ignore[valid-type]
+    c2_key_optimization: BoolProperty(name="Key Optimization", default=True)  # type: ignore[valid-type]
+    c2_rotation_precision: FloatProperty(name="Rotation Precision", default=0.01, min=0.0)  # type: ignore[valid-type]
+    c2_position_precision: FloatProperty(name="Position Precision", default=0.01, min=0.0)  # type: ignore[valid-type]
+    c2_manual_range: BoolProperty(name="Manual Range", default=False)  # type: ignore[valid-type]
+    c2_manual_range_start: IntProperty(name="Start", default=0)  # type: ignore[valid-type]
+    c2_manual_range_end: IntProperty(name="End", default=0)  # type: ignore[valid-type]
 
 
 # ============================================================ register
@@ -1079,6 +1866,8 @@ _classes: tuple = (
     VIEW3D_PT_cryblend_tints,
     VIEW3D_PT_cryblend_textures,
     VIEW3D_PT_cryblend_physics,
+    VIEW3D_PT_cryblend_crysis2_tools,
+    VIEW3D_PT_cryblend_crysis3_tools,
     VIEW3D_PT_cryblend_animation,
     CRYBLEND_OT_set_object_dir,
     CRYBLEND_OT_replace_placeholders,
@@ -1091,6 +1880,16 @@ _classes: tuple = (
     CRYBLEND_OT_add_rigid_body_world,
     CRYBLEND_OT_toggle_collision_visibility,
     CRYBLEND_OT_apply_helper_display,
+    CRYBLEND_OT_apply_c3_metadata,
+    CRYBLEND_OT_select_c3_metadata,
+    CRYBLEND_OT_copy_c3_attachment_xml,
+    CRYBLEND_OT_audit_c3_asset,
+    CRYBLEND_OT_reset_camera_pivots,
+    CRYBLEND_OT_apply_c2_material_physicalize,
+    CRYBLEND_OT_create_c2_export_node,
+    CRYBLEND_OT_apply_c2_object_properties,
+    CRYBLEND_OT_apply_c2_export_options,
+    CRYBLEND_OT_copy_c2_shape_report,
     CRYBLEND_OT_set_active_action,
     CRYBLEND_OT_push_action_to_nla,
     CRYBLEND_OT_import_extra_clip,
