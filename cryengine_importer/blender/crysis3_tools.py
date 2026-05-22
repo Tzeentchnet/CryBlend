@@ -607,7 +607,8 @@ def _audit_materials(
                             f"Material ID {number} duplicates {previous}.",
                         )
                     )
-        physicalize = str(row.get("physicalize", "")).strip()
+        physicalize_value = row.get("physicalize")
+        physicalize = "" if physicalize_value is None else str(physicalize_value).strip()
         if physicalize and physicalize not in C3_PHYSICALIZE_SURFACES:
             issues.append(
                 Crysis3AuditIssue(

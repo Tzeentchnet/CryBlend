@@ -18,6 +18,7 @@ from cryengine_importer.models.physics import (
     PhysicsCube,
     PhysicsCylinder,
     PhysicsData,
+    PhysicsPolyhedron,
     PhysicsPrimitiveType,
     read_physics_cube,
     read_physics_cylinder,
@@ -71,6 +72,26 @@ def _physics_data_prefix(primitive_type: int) -> bytes:
         + struct.pack("<2f", 0.0, 0.0)
         + struct.pack("<I", primitive_type)
     )
+
+
+def _polyhedron_bytes() -> bytes:
+    vertices = [
+        (1.0, 2.0, 3.0),
+        (4.0, 2.0, 3.0),
+        (1.0, 5.0, 3.0),
+    ]
+    triangles = [(0, 1, 2)]
+    body = struct.pack("<IIiI", len(vertices), len(triangles), 9, 0x10408040)
+    body += struct.pack("<B", 1)  # has vertex map
+    body += struct.pack("<3H", 0, 1, 2)
+    body += struct.pack("<B", 0)  # embedded vertices/triangles
+    body += b"".join(struct.pack("<3f", *vertex) for vertex in vertices)
+    body += b"".join(struct.pack("<3H", *triangle) for triangle in triangles)
+    body += struct.pack("<b", 1)  # unknown210
+    body += struct.pack("<B", 7)  # triangle flag
+    body += bytes(range(16))
+    body += struct.pack("<iifffffffI", 0, 0, -1, 0, -1, 0, -1, 0, -1, 1)
+    return body
 
 
 # ---------------------------------------------------------- registration --
@@ -142,11 +163,31 @@ def test_physics_data_prefix_only_unknown_primitive() -> None:
 
 
 def test_physics_data_polyhedron_is_skipped_with_flag() -> None:
-    """Polyhedron primitive is recorded but its payload is not decoded."""
+    """Prefix-only polyhedron records stay safely marked as skipped."""
     body = _physics_data_prefix(int(PhysicsPrimitiveType.POLYHEDRON))
     pd = read_physics_data(BinaryReader(io.BytesIO(body)))
     assert pd.primitive is PhysicsPrimitiveType.POLYHEDRON
     assert pd.polyhedron_skipped is True
+    assert pd.polyhedron is None
+
+
+def test_physics_data_polyhedron_embedded_geometry_decoded() -> None:
+    body = _physics_data_prefix(int(PhysicsPrimitiveType.POLYHEDRON))
+    body += _polyhedron_bytes()
+    br = BinaryReader(io.BytesIO(body))
+    pd = read_physics_data(br, payload_size=len(body))
+    assert pd.primitive is PhysicsPrimitiveType.POLYHEDRON
+    assert pd.polyhedron_skipped is False
+    assert isinstance(pd.polyhedron, PhysicsPolyhedron)
+    assert pd.polyhedron.has_embedded_geometry is True
+    assert pd.polyhedron.num_vertices == 3
+    assert pd.polyhedron.num_triangles == 1
+    assert pd.polyhedron.vertex_map == (0, 1, 2)
+    assert pd.polyhedron.vertices[1] == (4.0, 2.0, 3.0)
+    assert pd.polyhedron.triangles == ((0, 1, 2),)
+    assert pd.polyhedron.triangle_flags == (7,)
+    assert pd.polyhedron.data_type == 1
+    assert br.tell() == len(body)
     assert pd.cube is None
     assert pd.cylinder is None
 
@@ -187,6 +228,19 @@ def test_mesh_physics_data_800_with_cube_payload() -> None:
     assert chunk.physics_data.primitive is PhysicsPrimitiveType.CUBE
     assert chunk.physics_data.cube is not None
     assert chunk.physics_data.cube.unknown_16 == 13
+
+
+def test_mesh_physics_data_800_with_polyhedron_payload() -> None:
+    pd_bytes = _physics_data_prefix(int(PhysicsPrimitiveType.POLYHEDRON))
+    pd_bytes += _polyhedron_bytes()
+    body = struct.pack("<6I", len(pd_bytes), 0, 0, 5, 0, 0) + pd_bytes
+
+    chunk = _drive(ChunkType.MeshPhysicsData, 0x800, body)
+    assert chunk.physics_data_size == len(pd_bytes)
+    assert isinstance(chunk.physics_data, PhysicsData)
+    assert chunk.physics_data.primitive is PhysicsPrimitiveType.POLYHEDRON
+    assert chunk.physics_data.polyhedron is not None
+    assert chunk.physics_data.polyhedron.vertices[2] == (1.0, 5.0, 3.0)
 
 
 def test_mesh_physics_data_800_with_cylinder_payload_and_tetrahedra() -> None:

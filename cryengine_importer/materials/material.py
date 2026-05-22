@@ -83,6 +83,26 @@ _MAP_TO_SLOT: dict[str, str] = {
 }
 
 
+_SUFFIX_OVERRIDE_MAPS = {
+    "",
+    "Diffuse",
+    "Bumpmap",
+    "Normal",
+    "Specular",
+    "Heightmap",
+    "Height",
+    "Smoothness",
+    "GlossNormalA",
+    "Emittance",
+    "Occlusion",
+    "TexSlot1",
+    "TexSlot2",
+    "TexSlot4",
+    "TexSlot9",
+    "TexSlot10",
+}
+
+
 # Texture-filename suffix conventions used across stock CryEngine titles
 # (MWO, Aion, ArcheAge, Crysis, Star Citizen, modded Crysis assets).
 # A texture file's *basename* (without extension) ending in one of
@@ -161,12 +181,19 @@ class Texture:
         File-suffix conventions (``_ddna`` / ``_ddn`` / ``_diff`` /
         ``_spec`` / ``_displ`` / ``_pom_height`` / ``_disp`` /
         ``_decal`` / ``_damage`` / ``_stencil`` / ``_em`` / ``_ao``)
-        win over the raw ``Map`` attribute, because Crytek artists
-        frequently leave ``Map="Diffuse"`` even on packed normal/gloss
-        maps. Falls back to the ``Map`` table, then to a lower-cased
+        can refine the raw ``Map`` attribute for core material channels,
+        because Crytek artists frequently leave ``Map="Diffuse"`` even
+        on packed normal/gloss maps. Explicit branch layers such as
+        ``Custom``, ``[1] Custom``, ``Detail`` and ``Decal`` keep their
+        raw slot so dirt/damage overlays do not overwrite Base Color or
+        Normal. Falls back to the ``Map`` table, then to a lower-cased
         version of the raw map string for unknown values.
         """
-        suffix_slot = classify_texture_suffix(self.file)
+        suffix_slot = (
+            classify_texture_suffix(self.file)
+            if self.map in _SUFFIX_OVERRIDE_MAPS
+            else None
+        )
         if suffix_slot is not None:
             return suffix_slot
         return _MAP_TO_SLOT.get(self.map, self.map.lower())
@@ -349,6 +376,10 @@ class Material:
     @property
     def use_gloss_in_specular_map(self) -> bool:
         return "SPECULARPOW_GLOSSALPHA" in self.gen_mask_flags
+
+    @property
+    def use_gloss_in_diffuse_alpha(self) -> bool:
+        return "GLOSS_DIFFUSEALPHA" in self.gen_mask_flags
 
     @property
     def is_two_sided(self) -> bool:

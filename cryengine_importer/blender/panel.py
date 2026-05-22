@@ -1,7 +1,7 @@
 """Phase 11 — CryBlend sidebar panel for the 3D Viewport.
 
 Adds a "CryBlend" tab in the N-panel (`bl_category='CryBlend'`) with
-six sub-panels:
+focused sub-panels:
 
 * **General** — source path, axes, Re-import.
 * **Materials** — library status, Set Object Directory, Reload .mtl,
@@ -11,6 +11,8 @@ six sub-panels:
 * **Textures** — missing-image audit, Relink Directory, Export List.
 * **Physics** — collision-shape count + visibility toggle, Add Rigid
   Body World, helper-display switcher.
+* **CDF Attachments** — attachment counts, warnings, visibility
+    controls for CDF-composed imports.
 * **Animation** — list armature actions, Set Active, Push to NLA,
   Import Extra Clip.
 
@@ -55,7 +57,9 @@ from .asset_metadata import (
     find_active_cryblend_collection,
     read_metadata,
     stamp_collection,
+    summarize_cdf_attachments,
 )
+from .import_visibility import is_default_hidden_object
 from .crysis3_tools import (
     CRYSIS3_METADATA_KEY,
     apply_crysis3_settings,
@@ -113,6 +117,101 @@ def _is_collision_object(obj) -> bool:
     return "_collision" in name or name.startswith("physics_")
 
 
+def _is_cdf_attachment_object(obj) -> bool:
+    try:
+        return bool(obj.get("cryblend_cdf_attachment"))
+    except Exception:
+        return False
+
+
+def _selected_cdf_attachment_slot(
+    context: Any,
+    coll: Any,
+    attachment_name: str = "",
+):
+    coll_objects = _collection_objects_recursive(coll)
+    if attachment_name:
+        for obj in coll_objects:
+            if str(obj.get("cryblend_cdf_attachment") or obj.name) == attachment_name:
+                return obj
+
+    active = getattr(context, "active_object", None)
+    if active is not None and _is_cdf_attachment_object(active):
+        if active in coll_objects:
+            return active
+
+    selected = []
+    for obj in getattr(context, "selected_objects", ()) or ():
+        if not _is_cdf_attachment_object(obj):
+            continue
+        if obj not in coll_objects:
+            continue
+        selected.append(obj)
+    if len(selected) == 1:
+        return selected[0]
+    return None
+
+
+def _collection_objects_recursive(collection: Any) -> list:
+    objects = list(getattr(collection, "objects", ()))
+    for child in getattr(collection, "children", ()):
+        objects.extend(_collection_objects_recursive(child))
+    return objects
+
+
+def _pack_context_for_external_model(filepath: Path, object_dir: str) -> tuple[Path, str]:
+    resolved = filepath.resolve()
+    if object_dir:
+        root = Path(object_dir).resolve()
+        try:
+            return root, resolved.relative_to(root).as_posix()
+        except ValueError:
+            pass
+    return resolved.parent, resolved.name
+
+
+def _update_cdf_attachment_metadata(
+    coll: Any,
+    *,
+    attachment_name: str,
+    binding: str,
+    resolved_binding: str,
+    asset: Any,
+) -> None:
+    meta = read_metadata(coll) or {}
+    attachments = [dict(item) for item in meta.get("cdf_attachments", []) or []]
+    for item in attachments:
+        if str(item.get("name") or "") != attachment_name:
+            continue
+        item["binding"] = binding
+        item["resolved_binding"] = resolved_binding
+        item["status"] = "bound"
+        break
+    else:
+        attachments.append(
+            {
+                "name": attachment_name,
+                "type": "CA_BONE",
+                "binding": binding,
+                "resolved_binding": resolved_binding,
+                "status": "bound",
+                "visible": True,
+            }
+        )
+    meta["cdf_attachments"] = attachments
+    material_libs = list(meta.get("material_libs", []) or [])
+    for name in getattr(asset, "material_library_files", []):
+        if name not in material_libs:
+            material_libs.append(name)
+    meta["material_libs"] = material_libs
+    resolved_libs = list(meta.get("material_libs_resolved", []) or [])
+    for key in getattr(asset, "materials", {}).keys():
+        if key not in resolved_libs:
+            resolved_libs.append(key)
+    meta["material_libs_resolved"] = resolved_libs
+    coll[METADATA_KEY] = meta
+
+
 # ============================================================ helpers
 
 
@@ -157,6 +256,140 @@ def _selected_crytools_profile(props):
     return get_crytools_profile(getattr(props, "crytools_target_profile", CRYSIS2))
 
 
+def _action_prop(action, key: str) -> str:
+    try:
+        return str(action.get(key, ""))
+    except Exception:
+        return ""
+
+
+def _actions_for_target(obj, *, kind: str | None = None) -> list:
+    actions = []
+    for action in bpy.data.actions:
+        if _action_prop(action, "cryblend_target") != obj.name:
+            continue
+        if kind is not None and _action_prop(action, "cryblend_kind") != kind:
+            continue
+        actions.append(action)
+    actions.sort(
+        key=lambda action: (
+            _action_kind_rank(_action_prop(action, "cryblend_clip_kind")),
+            action.name.lower(),
+        )
+    )
+    active = getattr(getattr(obj, "animation_data", None), "action", None)
+    if active is not None and active in actions:
+        actions.remove(active)
+        actions.insert(0, active)
+    elif active is not None:
+        actions.insert(0, active)
+    return actions
+
+
+def _action_kind_rank(kind: str) -> int:
+    return {
+        "full_body": 0,
+        "partial_body": 1,
+        "additive": 2,
+        "aim_pose": 3,
+        "look_pose": 4,
+        "metadata": 5,
+    }.get(kind or "full_body", 6)
+
+
+def _action_kind_label(kind: str) -> str:
+    return {
+        "full_body": "Full",
+        "partial_body": "Partial",
+        "additive": "Add",
+        "aim_pose": "Aim",
+        "look_pose": "Look",
+        "metadata": "Meta",
+    }.get(kind or "full_body", "Other")
+
+
+def _is_pose_layer_action(action) -> bool:
+    kind = _action_prop(action, "cryblend_clip_kind") or "full_body"
+    if kind in {"additive", "aim_pose", "look_pose", "metadata"}:
+        return True
+    try:
+        additive = action.get("cryblend_is_additive", False)
+    except Exception:
+        additive = False
+    if isinstance(additive, str):
+        return additive.strip().lower() in {"1", "true", "yes"}
+    return bool(additive)
+
+
+def _action_frame_bounds(action) -> tuple[int, int]:
+    try:
+        start, end = action.frame_range
+    except Exception:
+        return (1, 1)
+    return (int(round(start)), int(round(end)))
+
+
+def _start_timeline_playback(context: Any) -> None:
+    screen = getattr(context, "screen", None)
+    if screen is None or getattr(screen, "is_animation_playing", False):
+        return
+    try:
+        bpy.ops.screen.animation_play()
+    except Exception:
+        logger.debug("failed to start timeline playback", exc_info=True)
+
+
+def _reset_action_target_pose(obj) -> None:
+    if getattr(obj, "type", "") == "ARMATURE":
+        for pose_bone in getattr(getattr(obj, "pose", None), "bones", []):
+            pose_bone.location = (0.0, 0.0, 0.0)
+            pose_bone.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+            pose_bone.rotation_euler = (0.0, 0.0, 0.0)
+            pose_bone.rotation_axis_angle = (0.0, 0.0, 1.0, 0.0)
+            pose_bone.scale = (1.0, 1.0, 1.0)
+        return
+
+    obj.location = (0.0, 0.0, 0.0)
+    obj.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+    obj.rotation_euler = (0.0, 0.0, 0.0)
+    obj.rotation_axis_angle = (0.0, 0.0, 1.0, 0.0)
+    obj.scale = (1.0, 1.0, 1.0)
+
+
+def _animated_targets_in_collection(coll) -> list:
+    out = []
+    for obj in getattr(coll, "all_objects", coll.objects):
+        if _actions_for_target(obj):
+            out.append(obj)
+    return out
+
+
+def _draw_action_rows(layout, obj, actions, *, label: str | None = None) -> None:
+    ad = getattr(obj, "animation_data", None)
+    active_action = ad.action if ad else None
+    if label:
+        layout.label(text=label, icon="OBJECT_DATA")
+    layout.label(text=f"Active: {active_action.name if active_action else '(none)'}")
+
+    if not actions:
+        return
+    box = layout.box()
+    for action in actions[:24]:
+        row = box.row(align=True)
+        row.label(text=action.name)
+        clip_kind = _action_prop(action, "cryblend_clip_kind") or "full_body"
+        if clip_kind != "full_body":
+            row.label(text=_action_kind_label(clip_kind))
+        op = row.operator("cryblend.set_active_action", text="", icon="PLAY")
+        op.object_name = obj.name
+        op.action_name = action.name
+        op = row.operator("cryblend.push_action_to_nla", text="", icon="NLA_PUSHDOWN")
+        op.object_name = obj.name
+        op.action_name = action.name
+    if len(actions) > 24:
+        box.label(text=f"… and {len(actions) - 24} more")
+
+
 # ====================================================== general panel
 
 
@@ -181,6 +414,8 @@ class VIEW3D_PT_cryblend(Panel):
         col.label(text=f"Source: {Path(meta.get('source_path', '')).name or '?'}")
         if meta.get("object_dir"):
             col.label(text=f"Object Dir: {meta['object_dir']}")
+        if meta.get("animations_dir"):
+            col.label(text=f"Animations Dir: {meta['animations_dir']}")
         if meta.get("addon_version"):
             col.label(text=f"Addon: {meta['addon_version']}")
 
@@ -444,6 +679,158 @@ class VIEW3D_PT_cryblend_physics(Panel):
         )
 
 
+# ============================================================ CDF panel
+
+
+class VIEW3D_PT_cryblend_cdf(Panel):
+    bl_idname = "VIEW3D_PT_cryblend_cdf"
+    bl_label = "CDF Attachments"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "CryBlend"
+    bl_parent_id = "VIEW3D_PT_cryblend"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context):
+        coll = _active_collection(context)
+        if coll is None:
+            return False
+        meta = read_metadata(coll) or {}
+        return bool(meta.get("cdf_source_path"))
+
+    def draw(self, context):
+        layout = self.layout
+        coll = _active_collection(context)
+        meta = read_metadata(coll) or {}
+        summary = summarize_cdf_attachments(meta)
+        empty_slots = [
+            dict(item)
+            for item in summary.get("empty_details", [])
+            if str(dict(item).get("phys_prop_type") or "").lower() != "rope"
+        ]
+        hidden_variants = list(summary.get("hidden_details", []))
+
+        layout.label(
+            text=f"CDF: {Path(meta.get('cdf_source_path', '')).name or '?'}",
+            icon="OUTLINER_COLLECTION",
+        )
+        col = layout.column(align=True)
+        col.label(
+            text=(
+                f"Attachments: {summary['total']} "
+                f"({summary['bound']} bound, {summary['empty']} empty)"
+            )
+        )
+        if summary["missing"]:
+            col.label(text=f"Missing: {summary['missing']}", icon="ERROR")
+        if summary["hidden"]:
+            col.label(text=f"Hidden variants: {len(summary['hidden'])}", icon="HIDE_ON")
+        if summary["ropes"]:
+            col.label(text=f"Ropes: {len(summary['ropes'])}", icon="CURVE_DATA")
+
+        if summary["by_type"]:
+            box = layout.box()
+            box.label(text="Types:")
+            for att_type, count in sorted(summary["by_type"].items()):
+                box.label(text=f"{att_type}: {count}")
+
+        warnings = summary["warnings"]
+        if warnings:
+            box = layout.box()
+            box.label(text=f"Warnings: {len(warnings)}", icon="ERROR")
+            for warning in warnings[:4]:
+                box.label(text=str(warning))
+            if len(warnings) > 4:
+                box.label(text=f"... and {len(warnings) - 4} more")
+
+        box = layout.box()
+        box.label(text="Visibility", icon="HIDE_OFF")
+        row = box.row(align=True)
+        op = row.operator(
+            "cryblend.set_cdf_attachment_visibility",
+            text="Restore Source",
+            icon="HIDE_ON",
+        )
+        op.collection_name = coll.name
+        op.mode = "METADATA"
+        op = row.operator(
+            "cryblend.set_cdf_attachment_visibility",
+            text="Reveal All",
+            icon="RESTRICT_VIEW_OFF",
+        )
+        op.collection_name = coll.name
+        op.mode = "SHOW_ALL"
+
+        if hidden_variants:
+            box = layout.box()
+            header = box.row(align=True)
+            header.label(text=f"Hidden Variants ({len(hidden_variants)})", icon="HIDE_ON")
+            op = header.operator(
+                "cryblend.preview_cdf_hidden_variants",
+                text="Preview All",
+                icon="RESTRICT_SELECT_OFF",
+            )
+            op.collection_name = coll.name
+            op.attachment_name = ""
+
+            for item in hidden_variants[:6]:
+                data = dict(item)
+                name = str(data.get("name") or "<unnamed>")
+                status = str(data.get("status") or "")
+                label = name if status in ("", "bound") else f"{name} ({status})"
+                row = box.row(align=True)
+                row.label(text=label, icon="HIDE_ON")
+                op = row.operator(
+                    "cryblend.preview_cdf_hidden_variants",
+                    text="Preview",
+                    icon="RESTRICT_SELECT_OFF",
+                )
+                op.collection_name = coll.name
+                op.attachment_name = name
+            if len(hidden_variants) > 6:
+                box.label(text=f"... and {len(hidden_variants) - 6} more")
+
+        slot = _selected_cdf_attachment_slot(context, coll)
+        if empty_slots:
+            box = layout.box()
+            box.label(text=f"Empty Model Slots ({len(empty_slots)})", icon="CONSTRAINT_BONE")
+            for item in empty_slots[:8]:
+                name = str(item.get("name") or "<unnamed>")
+                row = box.row(align=True)
+                row.label(text=name, icon="CONSTRAINT_BONE")
+                op = row.operator(
+                    "cryblend.select_cdf_attachment_slot",
+                    text="Select",
+                    icon="RESTRICT_SELECT_OFF",
+                )
+                op.collection_name = coll.name
+                op.attachment_name = name
+                op = row.operator(
+                    "cryblend.bind_cdf_attachment_model",
+                    text="Bind",
+                    icon="CONSTRAINT_BONE",
+                )
+                op.collection_name = coll.name
+                op.attachment_name = name
+            if len(empty_slots) > 8:
+                box.label(text=f"... and {len(empty_slots) - 8} more")
+
+        row = layout.row(align=True)
+        row.enabled = slot is not None
+        op = row.operator(
+            "cryblend.bind_cdf_attachment_model",
+            text="Bind Active Slot…",
+            icon="CONSTRAINT_BONE",
+        )
+        op.collection_name = coll.name
+        op.attachment_name = (
+            str(slot.get("cryblend_cdf_attachment") or slot.name)
+            if slot is not None
+            else ""
+        )
+
+
 # ==================================================== Crysis 3 tools panel
 
 
@@ -690,56 +1077,49 @@ class VIEW3D_PT_cryblend_animation(Panel):
         coll = _active_collection(context)
         if coll is None:
             return False
-        return any(o.type == "ARMATURE" for o in coll.all_objects)
+        return any(o.type == "ARMATURE" for o in coll.all_objects) or bool(
+            _animated_targets_in_collection(coll)
+        )
 
     def draw(self, context):
         layout = self.layout
         coll = _active_collection(context)
         armatures = [o for o in coll.all_objects if o.type == "ARMATURE"]
-        if not armatures:
-            layout.label(text="No armature in this collection.", icon="INFO")
-            return
-        arm = armatures[0]
-        layout.label(text=f"Armature: {arm.name}", icon="ARMATURE_DATA")
+        animated_objects = [
+            obj for obj in _animated_targets_in_collection(coll)
+            if obj.type != "ARMATURE"
+        ]
 
-        ad = arm.animation_data
-        active_action = ad.action if ad else None
-        layout.label(
-            text=f"Active: {active_action.name if active_action else '(none)'}"
-        )
+        if armatures:
+            arm = armatures[0]
+            layout.label(text=f"Armature: {arm.name}", icon="ARMATURE_DATA")
+            _draw_action_rows(layout, arm, _actions_for_target(arm, kind="armature"))
 
-        # Find every action whose user list includes the armature.
-        all_actions = [
-            a for a in bpy.data.actions
-            if any(u == arm for u in getattr(a, "users", []) if hasattr(a, "users"))
-        ] or list(bpy.data.actions)
+            layout.separator()
+            op = layout.operator(
+                "cryblend.import_extra_clip",
+                text="Import Extra Clip…",
+                icon="ANIM_DATA",
+            )
+            op.collection_name = coll.name
+            op.armature_name = arm.name
 
-        if all_actions:
-            box = layout.box()
-            for a in all_actions[:24]:
-                row = box.row(align=True)
-                row.label(text=a.name)
-                op = row.operator(
-                    "cryblend.set_active_action", text="", icon="PLAY"
-                )
-                op.armature_name = arm.name
-                op.action_name = a.name
-                op = row.operator(
-                    "cryblend.push_action_to_nla", text="", icon="NLA_PUSHDOWN"
-                )
-                op.armature_name = arm.name
-                op.action_name = a.name
-            if len(all_actions) > 24:
-                box.label(text=f"… and {len(all_actions) - 24} more")
+        if animated_objects:
+            if armatures:
+                layout.separator()
+            layout.label(text="Object Actions", icon="ANIM_DATA")
+            shown = 0
+            for obj in animated_objects:
+                actions = _actions_for_target(obj, kind="object")
+                if not actions:
+                    continue
+                _draw_action_rows(layout, obj, actions, label=obj.name)
+                shown += len(actions)
+                if shown >= 24:
+                    break
 
-        layout.separator()
-        op = layout.operator(
-            "cryblend.import_extra_clip",
-            text="Import Extra Clip…",
-            icon="ANIM_DATA",
-        )
-        op.collection_name = coll.name
-        op.armature_name = arm.name
+        if not armatures and not animated_objects:
+            layout.label(text="No animation actions in this collection.", icon="INFO")
 
 
 # ============================================================ operators
@@ -1073,6 +1453,281 @@ class CRYBLEND_OT_apply_helper_display(Operator):
             obj.empty_display_size = props.helper_display_size
             n += 1
         self.report({"INFO"}, f"Applied to {n} empty(s).")
+        return {"FINISHED"}
+
+
+class CRYBLEND_OT_set_cdf_attachment_visibility(Operator):
+    bl_idname = "cryblend.set_cdf_attachment_visibility"
+    bl_label = "Set CDF Attachment Visibility"
+    bl_options = {"REGISTER", "UNDO"}
+
+    collection_name: StringProperty()  # type: ignore[valid-type]
+    mode: EnumProperty(  # type: ignore[valid-type]
+        items=(
+            ("METADATA", "Restore Source", "Restore source CDF visibility"),
+            ("SHOW_ALL", "Reveal All", "Reveal every imported CDF attachment"),
+        ),
+        default="METADATA",
+    )
+
+    @classmethod
+    def description(cls, context, properties):
+        mode = getattr(properties, "mode", "")
+        if mode == "METADATA":
+            return "Restore the source CDF visibility flags, including hidden variants and default-hidden helper objects"
+        if mode == "SHOW_ALL":
+            return "Reveal every imported CDF attachment object for inspection"
+        return "Update CDF attachment visibility"
+
+    def execute(self, context):
+        coll = bpy.data.collections.get(self.collection_name)
+        if coll is None:
+            self.report({"ERROR"}, "Collection not found")
+            return {"CANCELLED"}
+
+        targets = [o for o in coll.all_objects if _is_cdf_attachment_object(o)]
+        if not targets:
+            self.report({"INFO"}, "No CDF attachment objects found.")
+            return {"CANCELLED"}
+
+        meta = read_metadata(coll) or {}
+        visibility_by_attachment: dict[str, bool] = {}
+        for item in meta.get("cdf_attachments", []) or []:
+            data = dict(item)
+            name = str(data.get("name") or data.get("binding") or "")
+            if name:
+                visibility_by_attachment[name] = bool(data.get("visible", True))
+
+        for obj in targets:
+            visible = True
+            if self.mode == "METADATA":
+                attachment_name = str(obj.get("cryblend_cdf_attachment") or "")
+                if attachment_name in visibility_by_attachment:
+                    visible = visibility_by_attachment[attachment_name]
+                else:
+                    try:
+                        visible = bool(obj.get("cryblend_cdf_attachment_visible", True))
+                    except Exception:
+                        visible = True
+                if obj.get("cryblend_cdf_rope"):
+                    visible = False
+                if is_default_hidden_object(obj):
+                    visible = False
+            obj.hide_viewport = not visible
+            obj.hide_render = not visible
+
+        action = "Restored source visibility for" if self.mode == "METADATA" else "Revealed"
+        self.report({"INFO"}, f"{action} {len(targets)} CDF attachment object(s).")
+        return {"FINISHED"}
+
+
+class CRYBLEND_OT_preview_cdf_hidden_variants(Operator):
+    bl_idname = "cryblend.preview_cdf_hidden_variants"
+    bl_label = "Preview Hidden CDF Variants"
+    bl_description = "Reveal and select CDF attachments marked hidden by the source CDF"
+    bl_options = {"REGISTER", "UNDO"}
+
+    collection_name: StringProperty()  # type: ignore[valid-type]
+    attachment_name: StringProperty(default="", options={"HIDDEN", "SKIP_SAVE"})  # type: ignore[valid-type]
+
+    def execute(self, context):
+        coll = bpy.data.collections.get(self.collection_name)
+        if coll is None:
+            self.report({"ERROR"}, "Collection not found")
+            return {"CANCELLED"}
+
+        meta = read_metadata(coll) or {}
+        hidden_names: set[str] = set()
+        for item in meta.get("cdf_attachments", []) or []:
+            data = dict(item)
+            name = str(data.get("name") or data.get("binding") or "")
+            if not name or bool(data.get("visible", True)):
+                continue
+            if self.attachment_name and name != self.attachment_name:
+                continue
+            hidden_names.add(name)
+
+        if not hidden_names:
+            self.report({"INFO"}, "No hidden CDF variants found.")
+            return {"CANCELLED"}
+
+        targets = [
+            obj
+            for obj in _collection_objects_recursive(coll)
+            if str(obj.get("cryblend_cdf_attachment") or "") in hidden_names
+        ]
+        if not targets:
+            self.report({"WARNING"}, "No imported objects found for the hidden variant(s).")
+            return {"CANCELLED"}
+
+        for obj in targets:
+            obj.hide_viewport = False
+            obj.hide_render = False
+            try:
+                obj.hide_set(False)
+            except Exception:
+                pass
+
+        for obj in list(getattr(context, "selected_objects", ()) or ()):
+            try:
+                obj.select_set(False)
+            except Exception:
+                pass
+
+        selected = 0
+        for obj in targets:
+            try:
+                obj.select_set(True)
+                selected += 1
+            except Exception:
+                pass
+        if selected:
+            try:
+                context.view_layer.objects.active = targets[0]
+            except Exception:
+                pass
+
+        self.report(
+            {"INFO"},
+            f"Previewing {len(targets)} hidden variant object(s). Use Restore Source to hide them again.",
+        )
+        return {"FINISHED"}
+
+
+class CRYBLEND_OT_select_cdf_attachment_slot(Operator):
+    bl_idname = "cryblend.select_cdf_attachment_slot"
+    bl_label = "Select CDF Attachment Slot"
+    bl_description = "Select the CDF attachment slot object"
+    bl_options = {"REGISTER", "UNDO"}
+
+    collection_name: StringProperty()  # type: ignore[valid-type]
+    attachment_name: StringProperty(options={"HIDDEN", "SKIP_SAVE"})  # type: ignore[valid-type]
+
+    def execute(self, context):
+        coll = bpy.data.collections.get(self.collection_name)
+        if coll is None:
+            self.report({"ERROR"}, "Collection not found")
+            return {"CANCELLED"}
+
+        slot = _selected_cdf_attachment_slot(context, coll, self.attachment_name)
+        if slot is None:
+            self.report({"ERROR"}, "CDF attachment slot not found")
+            return {"CANCELLED"}
+
+        slot.hide_viewport = False
+        slot.hide_render = False
+        try:
+            slot.hide_set(False)
+        except Exception:
+            pass
+
+        for obj in list(getattr(context, "selected_objects", ()) or ()):
+            try:
+                obj.select_set(False)
+            except Exception:
+                pass
+        try:
+            slot.select_set(True)
+            context.view_layer.objects.active = slot
+        except Exception:
+            pass
+
+        self.report({"INFO"}, f"Selected CDF slot {slot.name}")
+        return {"FINISHED"}
+
+
+class CRYBLEND_OT_bind_cdf_attachment_model(Operator, ImportHelper):
+    """Import a model file under a CDF attachment slot."""
+
+    bl_idname = "cryblend.bind_cdf_attachment_model"
+    bl_label = "Bind Model to Slot"
+    bl_description = "Import a model under the active or row-selected CDF attachment slot"
+    bl_options = {"REGISTER", "UNDO"}
+
+    collection_name: StringProperty()  # type: ignore[valid-type]
+    attachment_name: StringProperty(options={"HIDDEN", "SKIP_SAVE"})  # type: ignore[valid-type]
+    filename_ext = ".cgf"
+    filter_glob: StringProperty(  # type: ignore[valid-type]
+        default="*.cgf;*.cga;*.chr;*.skin", options={"HIDDEN"}
+    )
+
+    def execute(self, context):
+        from mathutils import Matrix  # type: ignore[import-not-found]
+
+        from ..core.cryengine import CryEngine, UnsupportedFileError
+        from ..io.pack_fs import RealFileSystem
+        from .scene_builder import build_scene_result
+
+        coll = bpy.data.collections.get(self.collection_name)
+        if coll is None:
+            self.report({"ERROR"}, "Collection not found")
+            return {"CANCELLED"}
+
+        slot = _selected_cdf_attachment_slot(context, coll, self.attachment_name)
+        if slot is None:
+            self.report({"ERROR"}, "Select one CDF attachment slot first")
+            return {"CANCELLED"}
+
+        filepath = Path(self.filepath)
+        if not filepath.is_file():
+            self.report({"ERROR"}, "Model file not found")
+            return {"CANCELLED"}
+
+        meta = read_metadata(coll) or {}
+        object_dir = str(meta.get("object_dir") or "")
+        fs_root, rel_path = _pack_context_for_external_model(filepath, object_dir)
+        try:
+            asset = CryEngine(
+                rel_path,
+                RealFileSystem(fs_root),
+                object_dir=object_dir or str(fs_root),
+                load_related=True,
+                load_animations=False,
+            )
+            asset.process()
+        except UnsupportedFileError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        except Exception as exc:  # pragma: no cover - exercised in Blender
+            self.report({"ERROR"}, f"Failed to load model: {exc}")
+            return {"CANCELLED"}
+
+        child_name = f"{slot.get('cryblend_cdf_attachment') or slot.name}_{filepath.stem}"
+        child = bpy.data.collections.new(child_name)
+        coll.children.link(child)
+        scene = build_scene_result(
+            asset,
+            collection=child,
+            build_actions_enabled=False,
+        )
+        objects = _collection_objects_recursive(child)
+        roots = [obj for obj in objects if obj.parent is None]
+        for obj in roots:
+            obj.parent = slot
+            obj.matrix_parent_inverse = Matrix.Identity(4)
+            obj.matrix_basis = Matrix.Identity(4)
+
+        attachment_name = str(slot.get("cryblend_cdf_attachment") or slot.name)
+        attachment_type = str(slot.get("cryblend_cdf_attachment_type") or "CA_BONE")
+        for obj in objects:
+            obj["cryblend_cdf_attachment"] = attachment_name
+            obj["cryblend_cdf_attachment_type"] = attachment_type
+            obj["cryblend_cdf_attachment_flags"] = int(
+                slot.get("cryblend_cdf_attachment_flags", 0) or 0
+            )
+            obj["cryblend_cdf_attachment_visible"] = True
+
+        _update_cdf_attachment_metadata(
+            coll,
+            attachment_name=attachment_name,
+            binding=filepath.as_posix(),
+            resolved_binding=rel_path,
+            asset=asset,
+        )
+        self.report(
+            {"INFO"},
+            f"Bound {len(objects)} object(s) to CDF slot {attachment_name}",
+        )
         return {"FINISHED"}
 
 
@@ -1478,18 +2133,36 @@ class CRYBLEND_OT_set_active_action(Operator):
     bl_label = "Set Active Action"
     bl_options = {"REGISTER", "UNDO"}
 
+    object_name: StringProperty()  # type: ignore[valid-type]
     armature_name: StringProperty()  # type: ignore[valid-type]
     action_name: StringProperty()  # type: ignore[valid-type]
 
     def execute(self, context):
-        arm = bpy.data.objects.get(self.armature_name)
+        target_name = self.object_name or self.armature_name
+        obj = bpy.data.objects.get(target_name)
         action = bpy.data.actions.get(self.action_name)
-        if arm is None or action is None:
-            self.report({"ERROR"}, "Armature or action not found")
+        if obj is None or action is None:
+            self.report({"ERROR"}, "Object or action not found")
             return {"CANCELLED"}
-        if arm.animation_data is None:
-            arm.animation_data_create()
-        arm.animation_data.action = action
+        if _is_pose_layer_action(action):
+            clip_kind = _action_kind_label(
+                _action_prop(action, "cryblend_clip_kind") or "additive"
+            )
+            self.report(
+                {"WARNING"},
+                f"{clip_kind} clips are pose layers and cannot play standalone",
+            )
+            return {"CANCELLED"}
+        if obj.animation_data is None:
+            obj.animation_data_create()
+        _reset_action_target_pose(obj)
+        obj.animation_data.action = action
+        start, end = _action_frame_bounds(action)
+        if end >= start:
+            context.scene.frame_start = min(context.scene.frame_start, start)
+            context.scene.frame_end = max(context.scene.frame_end, end)
+            context.scene.frame_set(start)
+        _start_timeline_playback(context)
         return {"FINISHED"}
 
 
@@ -1498,18 +2171,20 @@ class CRYBLEND_OT_push_action_to_nla(Operator):
     bl_label = "Push Action to NLA"
     bl_options = {"REGISTER", "UNDO"}
 
+    object_name: StringProperty()  # type: ignore[valid-type]
     armature_name: StringProperty()  # type: ignore[valid-type]
     action_name: StringProperty()  # type: ignore[valid-type]
 
     def execute(self, context):
-        arm = bpy.data.objects.get(self.armature_name)
+        target_name = self.object_name or self.armature_name
+        obj = bpy.data.objects.get(target_name)
         action = bpy.data.actions.get(self.action_name)
-        if arm is None or action is None:
-            self.report({"ERROR"}, "Armature or action not found")
+        if obj is None or action is None:
+            self.report({"ERROR"}, "Object or action not found")
             return {"CANCELLED"}
-        if arm.animation_data is None:
-            arm.animation_data_create()
-        track = arm.animation_data.nla_tracks.new()
+        if obj.animation_data is None:
+            obj.animation_data_create()
+        track = obj.animation_data.nla_tracks.new()
         track.name = action.name
         track.strips.new(action.name, int(action.frame_range[0]), action)
         return {"FINISHED"}
@@ -1622,6 +2297,8 @@ class CRYBLEND_OT_reimport(Operator):
                 axis_up=meta.get("axis_up", "Z"),
                 convert_axes=bool(meta.get("convert_axes", True)),
                 import_related=bool(meta.get("import_related", True)),
+                import_cdf_composition=bool(meta.get("import_cdf_composition", True)),
+                animations_dir=meta.get("animations_dir", "") or "",
             )
         except Exception as exc:
             self.report({"ERROR"}, f"Re-import failed: {exc}")
@@ -1928,6 +2605,7 @@ _classes: tuple = (
     VIEW3D_PT_cryblend_tints,
     VIEW3D_PT_cryblend_textures,
     VIEW3D_PT_cryblend_physics,
+    VIEW3D_PT_cryblend_cdf,
     VIEW3D_PT_cryblend_crysis2_tools,
     VIEW3D_PT_cryblend_crysis3_tools,
     VIEW3D_PT_cryblend_animation,
@@ -1942,6 +2620,10 @@ _classes: tuple = (
     CRYBLEND_OT_add_rigid_body_world,
     CRYBLEND_OT_toggle_collision_visibility,
     CRYBLEND_OT_apply_helper_display,
+    CRYBLEND_OT_set_cdf_attachment_visibility,
+    CRYBLEND_OT_preview_cdf_hidden_variants,
+    CRYBLEND_OT_select_cdf_attachment_slot,
+    CRYBLEND_OT_bind_cdf_attachment_model,
     CRYBLEND_OT_apply_c3_metadata,
     CRYBLEND_OT_select_c3_metadata,
     CRYBLEND_OT_copy_c3_attachment_xml,

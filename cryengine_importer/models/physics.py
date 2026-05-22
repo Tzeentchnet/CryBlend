@@ -22,15 +22,10 @@ helper style we use elsewhere in ``models/``.
 * ``PrimitiveType.CUBE`` (132 bytes) — ``PhysicsCube`` + ``PhysicsStruct1``.
 * ``PrimitiveType.CYLINDER`` / ``UNKNOWN6`` (104 bytes) — ``PhysicsCylinder``
   / ``PhysicsShape6`` (identical layout per pyffi).
-
-``PrimitiveType.POLYHEDRON`` is intentionally **not** decoded: pyffi's
-schema for it is variable-size with multiple ``Unknown`` / ``Junk?`` /
-``not sure`` annotations and ``PhysicsDataType{0,1}`` substructs whose
-``Num Data 1`` field is documented as "usually 0xffffffff" without a
-firm rule. Shipping a guess would be worse than skipping the payload.
-The ``PhysicsData`` reader records the primitive type and stops there
-when it encounters a polyhedron, so the chunk-table walk still
-advances cleanly via the chunk header's ``size`` field.
+* ``PrimitiveType.POLYHEDRON`` embedded geometry — counts, optional
+    vertex map, vertices, triangle indices, and triangle flags. The
+    trailing solver/contact records remain opaque and are skipped via
+    the chunk's declared ``physics_data_size``.
 """
 
 from __future__ import annotations
@@ -149,6 +144,39 @@ def read_physics_cylinder(br) -> PhysicsCylinder:
     )
 
 
+@dataclass
+class PhysicsPolyhedron:
+    """Decoded mesh portion of ``PrimitiveType.POLYHEDRON``.
+
+    The records after ``data_type`` are CryPhysics internals whose
+    layout varies by subtype. They are not needed to display/import a
+    collision proxy mesh, so the reader captures the stable geometry
+    portion and skips the remaining payload by declared size.
+    """
+
+    num_vertices: int = 0
+    num_triangles: int = 0
+    unknown_17: int = 0
+    unknown_18: int = 0
+    has_vertex_map: int = 0
+    vertex_map: tuple[int, ...] = ()
+    use_data_stream: int = 0
+    vertices: tuple[tuple[float, float, float], ...] = ()
+    triangles: tuple[tuple[int, int, int], ...] = ()
+    unknown_210: int | None = None
+    triangle_flags: tuple[int, ...] = ()
+    triangle_map: tuple[int, ...] = ()
+    unknown_45: bytes = b""
+    unknown_461: int | None = None
+    unknown_462: int | None = None
+    unknown_tail: tuple[float, ...] = ()
+    data_type: int | None = None
+
+    @property
+    def has_embedded_geometry(self) -> bool:
+        return bool(self.vertices and self.triangles)
+
+
 # ----------------------------------------------------------- payload ------
 
 
@@ -174,6 +202,7 @@ class PhysicsData:
     primitive_type: int = -1  # raw uint; -1 means "no payload was read"
     cube: Optional[PhysicsCube] = None
     cylinder: Optional[PhysicsCylinder] = None  # also used for UNKNOWN6
+    polyhedron: Optional[PhysicsPolyhedron] = None
     polyhedron_skipped: bool = False
 
     @property
@@ -185,14 +214,16 @@ class PhysicsData:
             return None
 
 
-def read_physics_data(br) -> PhysicsData:
+def read_physics_data(br, *, payload_size: int | None = None) -> PhysicsData:
     """Read one ``PhysicsData`` record from ``br``.
 
-    Stops cleanly after the primitive-type uint when the primitive is
-    ``POLYHEDRON`` (sets :attr:`PhysicsData.polyhedron_skipped`); the
-    caller is responsible for using the chunk header's ``size`` to
-    advance past the unread bytes.
+    ``payload_size`` is the declared size of the enclosing
+    ``PhysicsData`` payload. Passing it lets variable-size polyhedrons
+    and unknown primitive records advance to the end of the payload
+    before any following tetrahedra bytes are read.
     """
+    payload_start = br.tell()
+    payload_end = payload_start + payload_size if payload_size is not None else None
     pd = PhysicsData()
     pd.unknown_4 = br.read_i32()
     pd.unknown_5 = br.read_i32()
@@ -212,8 +243,95 @@ def read_physics_data(br) -> PhysicsData:
     elif typed in (PhysicsPrimitiveType.CYLINDER, PhysicsPrimitiveType.UNKNOWN6):
         pd.cylinder = read_physics_cylinder(br)
     elif typed == PhysicsPrimitiveType.POLYHEDRON:
-        # See module docstring — pyffi's polyhedron schema is too
-        # under-specified to ship without a real fixture.
-        pd.polyhedron_skipped = True
-    # Unknown raw values: do nothing; chunk header size advances us.
+        pd.polyhedron = read_physics_polyhedron(br, payload_end=payload_end)
+        pd.polyhedron_skipped = not (
+            pd.polyhedron is not None and pd.polyhedron.has_embedded_geometry
+        )
+
+    if payload_end is not None and br.tell() < payload_end:
+        br.seek(payload_end)
     return pd
+
+
+def read_physics_polyhedron(br, *, payload_end: int | None = None) -> PhysicsPolyhedron | None:
+    """Read the stable geometry section of a polyhedron primitive.
+
+    Returns ``None`` if the payload is too short or uses an unsupported
+    geometry mode. When ``payload_end`` is provided, the stream is
+    positioned at that end before returning.
+    """
+    try:
+        if payload_end is not None and payload_end - br.tell() < 18:
+            return None
+        polyhedron = PhysicsPolyhedron(
+            num_vertices=br.read_u32(),
+            num_triangles=br.read_u32(),
+            unknown_17=br.read_i32(),
+            unknown_18=br.read_i32(),
+        )
+        has_vertex_map = br.read_u8()
+        vertex_map: tuple[int, ...] = ()
+        if has_vertex_map == 1:
+            if payload_end is not None and payload_end - br.tell() < polyhedron.num_vertices * 2 + 1:
+                return None
+            vertex_map = tuple(br.read_u16() for _ in range(polyhedron.num_vertices))
+        use_data_stream = br.read_u8()
+
+        vertices: tuple[tuple[float, float, float], ...] = ()
+        triangles: tuple[tuple[int, int, int], ...] = ()
+        unknown_210: int | None = None
+        triangle_flags: tuple[int, ...] = ()
+        triangle_map: tuple[int, ...] = ()
+
+        if use_data_stream == 0:
+            geometry_size = polyhedron.num_vertices * 12 + polyhedron.num_triangles * 6
+            geometry_size += 1 + polyhedron.num_triangles
+            if payload_end is not None and payload_end - br.tell() < geometry_size:
+                return None
+            vertices = tuple(br.read_vec3() for _ in range(polyhedron.num_vertices))
+            triangles = tuple(
+                (br.read_u16(), br.read_u16(), br.read_u16())
+                for _ in range(polyhedron.num_triangles)
+            )
+            unknown_210 = br.read_i8()
+            triangle_flags = tuple(br.read_u8() for _ in range(polyhedron.num_triangles))
+        elif use_data_stream == 1:
+            if payload_end is not None and payload_end - br.tell() < polyhedron.num_triangles * 2:
+                return None
+            triangle_map = tuple(br.read_u16() for _ in range(polyhedron.num_triangles))
+        else:
+            return None
+
+        unknown_45 = b""
+        unknown_461: int | None = None
+        unknown_462: int | None = None
+        unknown_tail: tuple[float, ...] = ()
+        data_type: int | None = None
+        if payload_end is None or payload_end - br.tell() >= 56:
+            unknown_45 = br.read_bytes(16)
+            unknown_461 = br.read_i32()
+            unknown_462 = br.read_i32()
+            unknown_tail = tuple(br.read_f32() for _ in range(7))
+            data_type = br.read_u32()
+
+        return PhysicsPolyhedron(
+            num_vertices=polyhedron.num_vertices,
+            num_triangles=polyhedron.num_triangles,
+            unknown_17=polyhedron.unknown_17,
+            unknown_18=polyhedron.unknown_18,
+            has_vertex_map=has_vertex_map,
+            vertex_map=vertex_map,
+            use_data_stream=use_data_stream,
+            vertices=vertices,
+            triangles=triangles,
+            unknown_210=unknown_210,
+            triangle_flags=triangle_flags,
+            triangle_map=triangle_map,
+            unknown_45=unknown_45,
+            unknown_461=unknown_461,
+            unknown_462=unknown_462,
+            unknown_tail=unknown_tail,
+            data_type=data_type,
+        )
+    except EOFError:
+        return None

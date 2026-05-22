@@ -1,6 +1,10 @@
 # Build output
 /dist/
 
+# Internal development reference
+/docs/
+/tests/
+
 # Python
 __pycache__/
 *.py[cod]

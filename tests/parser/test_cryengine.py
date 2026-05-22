@@ -15,6 +15,7 @@ from cryengine_importer.core.chunks.helper import ChunkHelper744
 from cryengine_importer.core.chunks.mesh import ChunkMesh800
 from cryengine_importer.core.chunks.mtl_name import ChunkMtlName744
 from cryengine_importer.core.chunks.node import ChunkNode823
+from cryengine_importer.core.chunks.source_info import ChunkSourceInfo0
 from cryengine_importer.enums import HelperType, MtlNameType
 from cryengine_importer.io.pack_fs import InMemoryFileSystem
 
@@ -50,6 +51,13 @@ def _make_mtl(chunk_id: int, name: str, mat_type: MtlNameType) -> ChunkMtlName74
     c.id = chunk_id
     c.name = name
     c.mat_type = mat_type
+    return c
+
+
+def _make_source_info(chunk_id: int, source_file: str) -> ChunkSourceInfo0:
+    c = ChunkSourceInfo0()
+    c.id = chunk_id
+    c.source_file = source_file
     return c
 
 
@@ -170,6 +178,148 @@ def test_collect_material_library_files_dedupes_and_filters() -> None:
     assert eng.material_library_files == ["shared/lib", "single_mat"]
 
 
+def test_collect_material_library_files_skips_unreferenced_placeholder_libraries() -> None:
+    grunt = _make_mtl(5, "grunt", MtlNameType.Library)
+    placeholder = _make_mtl(16, "Material #4600", MtlNameType.Library)
+    node = _make_node(64, "suit", object_id=0, parent_id=-1)
+    node.material_id = 5
+    model = _model_from_chunks("grunt_base.chr", [grunt, placeholder, node])
+
+    eng = CryEngine("grunt_base.chr", InMemoryFileSystem())
+    eng.models = [model]
+    eng._build_nodes()
+    eng._collect_material_library_files()
+
+    assert eng.material_library_files == ["grunt"]
+
+
+def test_collect_material_library_files_dedupes_same_stem_overrides() -> None:
+    chunk_lib = _make_mtl(10, "grunt", MtlNameType.Library)
+    model = _model_from_chunks("grunt_base.chr", [chunk_lib])
+
+    eng = CryEngine(
+        "grunt_base.chr",
+        InMemoryFileSystem(),
+        material_files=["objects/characters/alien/grunt/grunt"],
+    )
+    eng.models = [model]
+    eng._collect_material_library_files()
+
+    assert eng.material_library_files == ["objects/characters/alien/grunt/grunt"]
+
+
+def test_collect_material_library_files_uses_explicit_second_model_and_sidecar() -> None:
+    from_second_model = _make_mtl(20, "companion_lib", MtlNameType.Library)
+    model_a = _model_from_chunks("asset.cga", [])
+    model_b = _model_from_chunks("asset.cgam", [from_second_model])
+
+    fs = InMemoryFileSystem({"asset.mtl": b"", "companion_lib.mtl": b""})
+    eng = CryEngine("asset.cga", fs, material_files=["manual_lib"])
+    eng.models = [model_a, model_b]
+    eng._collect_material_library_files()
+
+    assert eng.material_library_files == [
+        "manual_lib",
+        "companion_lib",
+        "asset.mtl",
+    ]
+
+
+def test_collect_material_library_files_skips_missing_chunk_name_when_explicit() -> None:
+    explicit = _make_mtl(5, "objects/chars/squirrel/squirrel", MtlNameType.Library)
+    internal = _make_mtl(10, "new_sqrel", MtlNameType.Library)
+    node = _make_node(64, "squirrel", object_id=0, parent_id=-1)
+    node.material_id = 10
+    model = _model_from_chunks("squirrel.chr", [explicit, internal, node])
+
+    fs = InMemoryFileSystem({"objects/chars/squirrel/squirrel.mtl": b""})
+    eng = CryEngine(
+        "objects/chars/squirrel/squirrel.chr",
+        fs,
+        material_files=["objects/chars/squirrel/squirrel"],
+    )
+    eng.models = [model]
+    eng._build_nodes()
+    eng._collect_material_library_files()
+
+    assert eng.material_library_files == ["objects/chars/squirrel/squirrel"]
+
+
+def test_collect_material_library_files_does_not_duplicate_sidecar_stem() -> None:
+    mtl_chunk = _make_mtl(10, "asset", MtlNameType.Library)
+    model = _model_from_chunks("asset.cga", [mtl_chunk])
+
+    fs = InMemoryFileSystem({"asset.mtl": b""})
+    eng = CryEngine("asset.cga", fs)
+    eng.models = [model]
+    eng._collect_material_library_files()
+
+    assert eng.material_library_files == ["asset"]
+
+
+def test_collect_material_library_files_prefers_pathful_sidecar_for_bare_name() -> None:
+    mtl_chunk = _make_mtl(10, "hazmatsuit", MtlNameType.Library)
+    model = _model_from_chunks("objects/chars/hazmat/hazmatsuit.chr", [mtl_chunk])
+
+    fs = InMemoryFileSystem({"objects/chars/hazmat/hazmatsuit.mtl": b""})
+    eng = CryEngine("objects/chars/hazmat/hazmatsuit.chr", fs)
+    eng.models = [model]
+    eng._collect_material_library_files()
+
+    assert eng.material_library_files == ["objects/chars/hazmat/hazmatsuit"]
+
+
+def test_collect_material_library_files_resolves_bare_name_next_to_input() -> None:
+    mtl_chunk = _make_mtl(10, "marine_body", MtlNameType.Library)
+    model = _model_from_chunks("objects/chars/marine/pants.chr", [mtl_chunk])
+
+    fs = InMemoryFileSystem({"objects/chars/marine/marine_body.mtl": b""})
+    eng = CryEngine("objects/chars/marine/pants.chr", fs)
+    eng.models = [model]
+    eng._collect_material_library_files()
+
+    assert eng.material_library_files == ["objects/chars/marine/marine_body"]
+
+
+def test_collect_material_library_files_resolves_unique_bare_name_globally() -> None:
+    mtl_chunk = _make_mtl(10, "skeleton_male_generic", MtlNameType.Library)
+    model = _model_from_chunks("objects/chars/marine/pants.chr", [mtl_chunk])
+
+    fs = InMemoryFileSystem(
+        {"objects/chars/generic/skeleton_male_generic.mtl": b""}
+    )
+    eng = CryEngine("objects/chars/marine/pants.chr", fs)
+    eng.models = [model]
+    eng._collect_material_library_files()
+
+    assert eng.material_library_files == [
+        "objects/chars/generic/skeleton_male_generic"
+    ]
+
+
+def test_collect_material_library_files_resolves_bare_name_from_source_info() -> None:
+    mtl_chunk = _make_mtl(10, "debris", MtlNameType.Library)
+    source_info = _make_source_info(
+        11,
+        r"bjects\Vehicles\US_Cargoplane_Damaged\debris.max",
+    )
+    model = _model_from_chunks("objects/Effects/debris2.cgf", [mtl_chunk, source_info])
+
+    fs = InMemoryFileSystem(
+        {
+            "objects/Vehicles/US_Cargoplane_Damaged/debris.mtl": b"",
+            "objects/objects/library/Alien/Storage/Platforms/debris.mtl": b"",
+        }
+    )
+    eng = CryEngine("objects/Effects/debris2.cgf", fs)
+    eng.models = [model]
+    eng._collect_material_library_files()
+
+    assert eng.material_library_files == [
+        "objects/Vehicles/US_Cargoplane_Damaged/debris"
+    ]
+
+
 def test_chunks_property_flattens_across_models() -> None:
     a = _make_helper(1)
     b = _make_helper(2)
@@ -279,3 +429,25 @@ def test_process_collects_libraries_before_loading_materials(monkeypatch) -> Non
     assert calls[2] == "libs=['lib']", calls
     assert eng.material_library_files == ["lib"]
     assert eng.materials == {"lib": sentinel}
+
+
+def test_process_can_skip_related_animation_loading(monkeypatch) -> None:
+    from cryengine_importer.core import cryengine as ce_mod
+
+    stub_model = _model_from_chunks("hero.chr", [])
+    monkeypatch.setattr(
+        ce_mod.Model, "from_stream", classmethod(lambda cls, name, stream: stub_model)
+    )
+
+    fs = InMemoryFileSystem({"hero.chr": b"", "hero.chrparams": b""})
+    eng = CryEngine("hero.chr", fs, load_related=True, load_animations=False)
+    called = False
+
+    def load_animations_spy() -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(eng, "_load_animations", load_animations_spy)
+    eng.process()
+
+    assert not called

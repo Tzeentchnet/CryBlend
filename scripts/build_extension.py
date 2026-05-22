@@ -1,8 +1,8 @@
 """Build the CryEngine Importer Blender extension `.zip` into `dist/`.
 
 Blender 4.2+ extensions are plain zip archives whose root contains the
-`blender_manifest.toml` file alongside the addon's Python package. This
-script zips `cryengine_importer/` so the manifest sits at the zip root,
+`blender_manifest.toml` file alongside the addon's Python module. This
+script zips the contents of `cryengine_importer/` so the manifest sits at the zip root,
 excluding caches, byte-compiled files, and other dev artefacts.
 
 Usage:
@@ -63,17 +63,15 @@ def build(out_zip: Path) -> None:
     if out_zip.exists():
         out_zip.unlink()
 
-    addon_root_name = ADDON_DIR.name
     files = iter_addon_files()
     with zipfile.ZipFile(
         out_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
     ) as zf:
         for file in files:
-            # Blender expects manifest at zip root OR inside a single
-            # top-level folder. We use the addon folder name as the
-            # top-level entry so the unpacked install matches the
-            # source layout.
-            arcname = Path(addon_root_name) / file.relative_to(ADDON_DIR)
+            # Blender's validator accepts a single top-level folder,
+            # but Blender 5.0's installer expects add-on extensions to
+            # have the manifest and __init__.py at archive root.
+            arcname = file.relative_to(ADDON_DIR)
             zf.write(file, arcname.as_posix())
     print(f"Built {out_zip} ({len(files)} files, {out_zip.stat().st_size:,} bytes)")
 
@@ -85,7 +83,15 @@ def validate(zip_path: Path) -> int:
         return 0
     print(f"Validating with {blender} ...")
     result = subprocess.run(
-        [blender, "--command", "extension", "validate", str(zip_path)],
+        [
+            blender,
+            "--background",
+            "--factory-startup",
+            "--command",
+            "extension",
+            "validate",
+            str(zip_path),
+        ],
         check=False,
     )
     return result.returncode

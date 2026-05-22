@@ -165,6 +165,28 @@ def test_audit_crysis3_asset_flags_skinning_and_material_ids() -> None:
     assert "material-id-hole" in codes
 
 
+def test_audit_crysis3_asset_ignores_missing_physicalize_metadata() -> None:
+    issues = audit_crysis3_asset(
+        [
+            {
+                "name": "CryExport_prop",
+                "type": "EMPTY",
+                "export_type": "static_geometry",
+                "child_count": 1,
+            }
+        ],
+        [
+            {"name": "mat_missing"},
+            {"name": "mat_none", "physicalize": None},
+            {"name": "mat_empty", "physicalize": ""},
+        ],
+        fps=30,
+        unit_system="METRIC",
+    )
+
+    assert {issue.code for issue in issues} == set()
+
+
 def test_format_crysis3_audit_report_summarizes_findings() -> None:
     issues = audit_crysis3_asset(
         [

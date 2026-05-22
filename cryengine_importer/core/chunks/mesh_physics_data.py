@@ -78,7 +78,9 @@ class ChunkMeshPhysicsData800(ChunkMeshPhysicsData):
         self.reserved2 = br.read_u32()
 
         if self.physics_data_size != 0:
-            self.physics_data = read_physics_data(br)
+            self.physics_data = read_physics_data(
+                br, payload_size=self.physics_data_size
+            )
 
         # Tetrahedra payload is just raw bytes per pyffi. Cap by what's
         # left in the chunk so a short / corrupt header can't

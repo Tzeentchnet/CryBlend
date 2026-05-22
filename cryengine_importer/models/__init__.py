@@ -6,6 +6,13 @@ Blender bridge actually consumes. Keeping them here lets the mesh
 builder be unit-tested without Blender.
 """
 
+from .cdf import CdfAttachment, CdfDefinition, CdfModel
 from .geometry import MeshGeometry, SubsetRange
 
-__all__ = ["MeshGeometry", "SubsetRange"]
+__all__ = [
+	"CdfAttachment",
+	"CdfDefinition",
+	"CdfModel",
+	"MeshGeometry",
+	"SubsetRange",
+]

@@ -16,6 +16,7 @@ from cryengine_importer.models.physics import (
     PhysicsCube,
     PhysicsCylinder,
     PhysicsData,
+    PhysicsPolyhedron,
     PhysicsPrimitiveType,
 )
 from cryengine_importer.models.skinning import (
@@ -142,6 +143,26 @@ def test_plan_mesh_physics_shapes_no_payload_emits_nothing() -> None:
 def test_plan_mesh_physics_shapes_polyhedron_skipped() -> None:
     chunks = [_StubChunk(_pd(PhysicsPrimitiveType.POLYHEDRON))]
     assert plan_mesh_physics_shapes(chunks) == []
+
+
+def test_plan_mesh_physics_shapes_polyhedron_emits_mesh() -> None:
+    pd = _pd(PhysicsPrimitiveType.POLYHEDRON)
+    pd.center = (1.0, 2.0, 3.0)
+    pd.polyhedron = PhysicsPolyhedron(
+        num_vertices=3,
+        num_triangles=1,
+        vertices=((1.0, 2.0, 3.0), (4.0, 2.0, 3.0), (1.0, 5.0, 3.0)),
+        triangles=((0, 1, 2),),
+    )
+    chunks = [_StubChunk(pd)]
+    shapes = plan_mesh_physics_shapes(chunks)
+    assert len(shapes) == 1
+    assert shapes[0].name == "physics_0_polyhedron"
+    assert shapes[0].shape == "MESH"
+    assert shapes[0].location == (1.0, 2.0, 3.0)
+    assert shapes[0].dimensions == (3.0, 3.0, 0.0)
+    assert shapes[0].vertices == ((0.0, 0.0, 0.0), (3.0, 0.0, 0.0), (0.0, 3.0, 0.0))
+    assert shapes[0].faces == ((0, 1, 2),)
 
 
 def test_plan_mesh_physics_shapes_cube_emits_box() -> None:

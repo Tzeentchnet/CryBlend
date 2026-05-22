@@ -66,8 +66,10 @@ def test_parse_library_material_with_submaterials() -> None:
     mat = load_material("MultipleMats.xml", fs)
 
     assert mat is not None
+    assert mat.source_file == "MultipleMats.xml"
     names = [m.name for m in mat.sub_materials]
     assert names == ["body", "decals", "variant", "window", "generic"]
+    assert all(m.source_file == "MultipleMats.xml" for m in mat.sub_materials)
 
     # ``decals`` should have an empty Textures element.
     decals = next(m for m in mat.sub_materials if m.name == "decals")
@@ -84,6 +86,14 @@ def test_parse_library_material_with_submaterials() -> None:
     assert body.glow_amount == pytest.approx(0.75)
     assert "FresnelPower" in body.public_params
     assert body.public_params["FresnelPower"] == "4"
+
+
+def test_material_detects_gloss_in_diffuse_alpha_genmask() -> None:
+    xml = b'<Material StringGenMask="%GLOSS_DIFFUSEALPHA" Opacity="1"/>'
+    fs = InMemoryFileSystem({"x.mtl": xml})
+    mat = load_material("x.mtl", fs)
+    assert mat is not None
+    assert mat.use_gloss_in_diffuse_alpha
 
 
 def test_parse_pbxml_material() -> None:
@@ -199,6 +209,22 @@ def test_texture_slot_prefers_suffix_over_map_attribute() -> None:
     Map attribute as Diffuse on packed textures."""
     tex = Texture(map="Diffuse", file="objects/atlas_body_ddna.tif")
     assert tex.slot == "normals_gloss"
+
+
+@pytest.mark.parametrize(
+    ("map_name", "file_name", "expected"),
+    [
+        ("Custom", "objects/vehicles/textures/burned_car_diff.dds", "custom"),
+        ("[1] Custom", "textures/damage_ddn.tif", "custom_secondary"),
+        ("Detail", "textures/detail/detail_metal_d_ddn.tif", "detail"),
+        ("Decal", "textures/scratch_diff.tif", "decal"),
+    ],
+)
+def test_texture_slot_keeps_explicit_branch_layer_maps(
+    map_name: str, file_name: str, expected: str
+) -> None:
+    tex = Texture(map=map_name, file=file_name)
+    assert tex.slot == expected
 
 
 def test_texture_slot_falls_back_to_map_attribute() -> None:

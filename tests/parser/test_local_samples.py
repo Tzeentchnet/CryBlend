@@ -7,11 +7,14 @@ Sample assets used:
 - ARGO ATLS Power Suit (Star Citizen): a Cryengine character with skin
   meshes, a CDF, a CHR, and animated CGA prop pieces.
 - Crysis "sewers" pack: a folder of static .cgf props.
+- Crysis 3 squirrel: a small CryEngine 3 character with `.chrparams`
+    CAF animation entries.
 
 Override the default paths with env vars if your assets live elsewhere::
 
     set CRY_ATLS_DIR=D:\\my\\path\\ARGO\\ATLS
     set CRY_SEWERS_DIR=D:\\my\\path\\sewers
+        set CRY3_OBJECTS_DIR=D:\\my\\path\\Cry3Objects
 """
 
 from __future__ import annotations
@@ -22,16 +25,20 @@ from pathlib import Path
 import pytest
 
 from cryengine_importer.core import CryEngine
-from cryengine_importer.io.pack_fs import RealFileSystem
+from cryengine_importer.io.pack_fs import CascadedPackFileSystem, RealFileSystem
 
 
 # --------------------------------------------------------------- paths
 
 _ATLS_DEFAULT = Path(r"C:\Users\kennpet\Downloads\PowerSuit\PowerSuit\ARGO\ATLS")
 _SEWERS_DEFAULT = Path(r"C:\Users\kennpet\Downloads\sewers")
+_CRY3_OBJECTS_DEFAULT = Path(r"E:\SafeToCopy\Models\Cry3Objects")
 
 ATLS_DIR = Path(os.environ.get("CRY_ATLS_DIR", str(_ATLS_DEFAULT)))
 SEWERS_DIR = Path(os.environ.get("CRY_SEWERS_DIR", str(_SEWERS_DEFAULT)))
+CRY3_OBJECTS_DIR = Path(
+    os.environ.get("CRY3_OBJECTS_DIR", str(_CRY3_OBJECTS_DEFAULT))
+)
 
 
 def _require_dir(path: Path) -> None:
@@ -47,6 +54,25 @@ def _load(asset_dir: Path, file_name: str) -> CryEngine:
         pytest.skip(f"asset not present: {asset_path}")
     fs = RealFileSystem(str(asset_dir))
     eng = CryEngine(file_name, fs, object_dir=str(asset_dir))
+    eng.process()
+    return eng
+
+
+def _load_with_animation_layer(
+    asset_dir: Path,
+    file_name: str,
+    animations_dir: Path,
+) -> CryEngine:
+    """Run the parser with a second root for extracted CAF files."""
+    _require_dir(asset_dir)
+    _require_dir(animations_dir)
+    asset_path = asset_dir / Path(file_name)
+    if not asset_path.is_file():
+        pytest.skip(f"asset not present: {asset_path}")
+    fs = CascadedPackFileSystem(
+        [RealFileSystem(str(asset_dir)), RealFileSystem(str(animations_dir))]
+    )
+    eng = CryEngine(file_name.replace("\\", "/"), fs, object_dir=str(asset_dir))
     eng.process()
     return eng
 
@@ -114,3 +140,38 @@ def test_crysis_sewers_cgf_parses(cgf_name: str) -> None:
     assert eng.root_node is not None, f"{cgf_name}: no root node built"
     assert any(n.mesh_data is not None for n in eng.nodes), \
         f"{cgf_name}: expected at least one mesh node"
+
+
+# ----------------------------------------------------------- Crysis 3 squirrel
+
+
+def test_crysis3_squirrel_chr_loads_animation_clips() -> None:
+    eng = _load_with_animation_layer(
+        CRY3_OBJECTS_DIR,
+        "Objects/characters/animals/squirrel/squirrel.chr",
+        CRY3_OBJECTS_DIR / "Animations",
+    )
+
+    assert eng.chrparams is not None, "expected squirrel.chrparams to load"
+    assert len(eng.animation_models) == 3
+    assert {clip.name for clip in eng.animation_clips} == {
+        "idle01",
+        "walk_loop",
+        "run_loop",
+    }
+    assert all(clip.rotation_track_count > 0 for clip in eng.animation_clips)
+    assert any(clip.position_track_count > 0 for clip in eng.animation_clips)
+
+
+def test_crysis3_squirrel_chr_finds_nested_animation_root() -> None:
+    eng = _load(
+        CRY3_OBJECTS_DIR,
+        "Objects/characters/animals/squirrel/squirrel.chr",
+    )
+
+    assert eng.chrparams is not None, "expected squirrel.chrparams to load"
+    assert {clip.name for clip in eng.animation_clips} == {
+        "idle01",
+        "walk_loop",
+        "run_loop",
+    }

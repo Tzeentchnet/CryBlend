@@ -17,6 +17,7 @@ from ..chunk_registry import chunk
 from .mtl_name import ChunkMtlName
 
 
+@chunk(ChunkType.IvoMtlNameVariant, 0x900)
 @chunk(ChunkType.MtlNameIvo, 0x900)
 @chunk(ChunkType.MtlNameIvo320, 0x900)
 class ChunkMtlName900(ChunkMtlName):

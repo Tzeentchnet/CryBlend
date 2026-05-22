@@ -78,6 +78,13 @@ def test_mtl_name_900_routed_for_ivo320_alias() -> None:
     assert chunk.name == "foo/bar"
 
 
+def test_mtl_name_900_routed_for_variant_alias() -> None:
+    body = _fstring("materials/variant", 128)
+    chunk = _drive_ivo(ChunkType.IvoMtlNameVariant, 0x900, body)
+    assert isinstance(chunk, ChunkMtlName900)
+    assert chunk.name == "materials/variant"
+
+
 # ----------------------------------------------------- Mesh_900 ---------
 
 

@@ -11,10 +11,10 @@ from __future__ import annotations
 bl_info = {
     "name": "CryEngine Importer",
     "author": "Cryengine-Converter contributors",
-    "version": (0, 1, 3),
+    "version": (0, 1, 6),
     "blender": (5, 0, 0),
-    "location": "File > Import > CryEngine (.cgf/.chr/.skin)",
-    "description": "Import CryEngine model files (.cgf, .cga, .chr, .skin)",
+    "location": "File > Import > CryEngine (.cgf/.chr/.skin/.cdf)",
+    "description": "Import CryEngine model files (.cgf, .cga, .chr, .skin, .cdf)",
     "category": "Import-Export",
 }
 

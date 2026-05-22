@@ -84,6 +84,11 @@ class Model:
             self.file_type = FileType(br.read_u32())
             self.file_version = FileVersion(br.read_u32())  # 0x744 / 0x745
             self.chunk_table_offset = br.read_i32() + 4
+            if self.file_version == FileVersion.x0744:
+                table_bytes = br.length - self.chunk_table_offset
+                if table_bytes >= 0 and table_bytes % 16 == 0:
+                    self.num_chunks = table_bytes // 16
+                    return
             self.num_chunks = br.read_u32()
             return
 
@@ -99,11 +104,15 @@ class Model:
         # 0x744 has no per-entry size; derive from next entry's offset.
         if self.file_version == FileVersion.x0744:
             for i in range(self.num_chunks):
-                if i < self.num_chunks - 2:
-                    self.chunk_headers[i].size = (
-                        self.chunk_headers[i + 1].offset
-                        - self.chunk_headers[i].offset
-                    )
+                next_offset = (
+                    self.chunk_headers[i + 1].offset
+                    if i < self.num_chunks - 1
+                    else self.chunk_table_offset
+                )
+                self.chunk_headers[i].size = max(
+                    0,
+                    next_offset - self.chunk_headers[i].offset,
+                )
 
     def _read_chunks(self, br: BinaryReader) -> None:
         for hdr in self.chunk_headers:

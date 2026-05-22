@@ -48,6 +48,9 @@ def load_material(
 
     mat = Material.from_xml_root(root)
     mat.source_file = path
+    for sub in mat.sub_materials:
+        if sub.source_file is None:
+            sub.source_file = path
     return mat
 
 

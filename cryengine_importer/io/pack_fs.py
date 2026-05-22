@@ -74,6 +74,24 @@ class RealFileSystem(IPackFileSystem):
             cur = match
         return cur if cur.is_file() else None
 
+    def _resolve_dir(self, path: str) -> Path | None:
+        rel = _normalize(path)
+        if not rel:
+            return self._root
+        cur = self._root
+        for part in rel.split("/"):
+            if not part:
+                continue
+            try:
+                entries = list(cur.iterdir())
+            except (FileNotFoundError, NotADirectoryError):
+                return None
+            match = next((e for e in entries if e.name.lower() == part.lower()), None)
+            if match is None or not match.is_dir():
+                return None
+            cur = match
+        return cur
+
     def exists(self, path: str) -> bool:
         return self._resolve(path) is not None
 
@@ -90,9 +108,29 @@ class RealFileSystem(IPackFileSystem):
         return resolved.read_bytes()
 
     def glob(self, pattern: str) -> Iterable[str]:
-        for p in self._root.glob(pattern.replace("\\", "/")):
-            if p.is_file():
-                yield str(p.relative_to(self._root)).replace(os.sep, "/")
+        norm_pattern = _normalize(pattern)
+        parts = norm_pattern.split("/")
+        prefix_parts: list[str] = []
+        for part in parts:
+            if any(ch in part for ch in "*?["):
+                break
+            prefix_parts.append(part)
+        base_dir = self._resolve_dir("/".join(prefix_parts))
+        if base_dir is None:
+            return
+
+        remaining = parts[len(prefix_parts):]
+        if len(remaining) == 1:
+            candidates = base_dir.iterdir()
+        else:
+            candidates = base_dir.rglob("*")
+        norm_pattern_lower = norm_pattern.lower()
+        for p in candidates:
+            if not p.is_file():
+                continue
+            rel = str(p.relative_to(self._root)).replace(os.sep, "/")
+            if fnmatch.fnmatchcase(rel.lower(), norm_pattern_lower):
+                yield rel
 
 
 class CascadedPackFileSystem(IPackFileSystem):
@@ -158,16 +196,10 @@ class InMemoryFileSystem(IPackFileSystem):
         return self._files[key]
 
     def glob(self, pattern: str) -> Iterable[str]:
-        # Minimal glob: only supports trailing '*' and exact matches.
-        if pattern.endswith("*"):
-            prefix = _normalize(pattern[:-1])
-            for k in self._files:
-                if k.startswith(prefix):
-                    yield k
-        else:
-            n = _normalize(pattern)
-            if n in self._files:
-                yield n
+        norm_pattern = _normalize(pattern).lower()
+        for key in self._files:
+            if fnmatch.fnmatchcase(key.lower(), norm_pattern):
+                yield key
 
 
 class ZipFileSystem(IPackFileSystem):

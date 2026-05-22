@@ -34,6 +34,18 @@ def test_real_fs_case_insensitive(tmp_path: Path) -> None:
     assert fs.read_all_bytes("sub/model.cgf") == b"data"
 
 
+def test_real_fs_glob_case_insensitive(tmp_path: Path) -> None:
+    (tmp_path / "animations" / "alien" / "grunt").mkdir(parents=True)
+    (tmp_path / "animations" / "alien" / "grunt" / "idle.CAF").write_bytes(b"")
+    (tmp_path / "animations" / "alien" / "grunt" / "walk.caf").write_bytes(b"")
+    fs = RealFileSystem(tmp_path)
+
+    assert sorted(fs.glob("Animations/Alien/Grunt/*.caf")) == [
+        "animations/alien/grunt/idle.CAF",
+        "animations/alien/grunt/walk.caf",
+    ]
+
+
 def test_cascaded_lifo(tmp_path: Path) -> None:
     a = InMemoryFileSystem({"x.txt": b"A"})
     b = InMemoryFileSystem({"x.txt": b"B"})

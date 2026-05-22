@@ -67,6 +67,9 @@ def build_armature(
             eb.head = (0.0, 0.0, 0.0)
             eb.tail = (0.0, _DEFAULT_BONE_LENGTH, 0.0)
             world = world_by_bone[id(bone)]
+            # Keep the Cry bind orientation intact; moving the tail
+            # toward a child changes Blender's bone roll and breaks
+            # decoded CAF rotation bases.
             eb.matrix = world
             edit_by_index.append(eb)
 
@@ -75,21 +78,6 @@ def build_armature(
                 parent_idx = info.compiled_bones.index(bone.parent_bone)
                 eb.parent = edit_by_index[parent_idx]
 
-        # Adjust tails so each bone points toward its (single) child for
-        # nicer visualisation. Bones with multiple or no children keep
-        # the default length along +Y.
-        children: dict[int, list[int]] = {}
-        for i, b in enumerate(info.compiled_bones):
-            if b.parent_bone is not None:
-                p = info.compiled_bones.index(b.parent_bone)
-                children.setdefault(p, []).append(i)
-
-        for i, eb in enumerate(edit_by_index):
-            ch = children.get(i, [])
-            if len(ch) == 1:
-                child_head = edit_by_index[ch[0]].head
-                if (child_head - eb.head).length > 1e-6:
-                    eb.tail = child_head
     finally:
         bpy.ops.object.mode_set(mode="OBJECT")
 

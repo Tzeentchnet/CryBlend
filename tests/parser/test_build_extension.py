@@ -2,11 +2,8 @@
 
 These tests assert the layout Blender's extension installer requires:
 
-- A single top-level directory in the zip that contains
-  `blender_manifest.toml` (matches Blender's
-  `pkg_zipfile_detect_subdir_or_none`).
-- An `__init__.py` next to the manifest (required for `type = "add-on"`
-  by Blender's `subcmd_author._validate_archive`).
+- `blender_manifest.toml` at archive root.
+- An `__init__.py` next to the manifest (required for `type = "add-on"`).
 - No `__pycache__/` or `*.pyc` artefacts.
 - The version embedded in the output filename matches the manifest.
 """
@@ -50,17 +47,15 @@ def test_zip_exists_and_nonempty(built_zip: Path) -> None:
     assert built_zip.stat().st_size > 0
 
 
-def test_single_top_level_subdir_contains_manifest(built_zip: Path) -> None:
+def test_zip_root_contains_manifest(built_zip: Path) -> None:
     with zipfile.ZipFile(built_zip) as zf:
         names = zf.namelist()
-    top_level = {n.split("/", 1)[0] for n in names if n}
-    assert top_level == {"cryengine_importer"}, top_level
-    assert "cryengine_importer/blender_manifest.toml" in names
+    assert "blender_manifest.toml" in names
 
 
 def test_addon_init_present(built_zip: Path) -> None:
     with zipfile.ZipFile(built_zip) as zf:
-        assert "cryengine_importer/__init__.py" in zf.namelist()
+        assert "__init__.py" in zf.namelist()
 
 
 def test_no_cache_or_pyc_artefacts(built_zip: Path) -> None:

@@ -1,8 +1,8 @@
 """ChunkController.
 
 Port of CgfConverter/CryEngineCore/Chunks/ChunkController*.cs.
-Implements 0x826 (legacy keyed controller), 0x829 (header-only stub
-matching the C# reference), and 0x905 (Star Citizen / new CryAnimation
+Implements 0x826 (legacy keyed controller), 0x829 / 0x831 compressed
+dual-track controllers, and 0x905 (Star Citizen / new CryAnimation
 controller with compressed quaternion / vec3 tracks).
 """
 
@@ -56,13 +56,18 @@ class ChunkController826(ChunkController):
         self.controller_flags = br.read_u32()
         self.controller_id = br.read_u32()
         for _ in range(self.num_keys):
-            self.keys.append(
-                ControllerKey(
-                    time=br.read_i32(),
-                    abs_pos=br.read_vec3(),
-                    rel_pos=br.read_vec3(),
-                )
+            key = ControllerKey(
+                time=br.read_i32(),
+                abs_pos=br.read_vec3(),
+                rel_pos=br.read_vec3(),
             )
+            if self.controller_type == CtrlType.CRYBONE:
+                key.rel_quat = br.read_quat()
+            if self.controller_type in (CtrlType.BEZIER3, CtrlType.TBCQ):
+                key.unknown1 = br.read_vec3()
+            if self.controller_type == CtrlType.TBC3:
+                key.unknown2 = (br.read_f32(), br.read_f32())
+            self.keys.append(key)
 
 
 # -- 0x829 ---------------------------------------------------------------
@@ -70,12 +75,13 @@ class ChunkController826(ChunkController):
 
 @chunk(ChunkType.Controller, 0x829)
 class ChunkController829(ChunkController):
-    """Header-only controller stub.
+    """Crysis 2 compressed dual-track controller.
 
-    The C# reference (ChunkController_829.cs) only forces the reader
-    back to little-endian and reads no body; the actual on-disk layout
-    is unknown / undocumented. We mirror that behaviour so files
-    containing this chunk-type don't crash the loader.
+    Upstream CgfConverter leaves 0x829 as a stub, but Crysis 2 CAFs
+    use the same compact body shape as the documented 0x831 controller:
+    a per-bone controller id, rotation/position key counts, format
+    bytes, then compressed rotation values, time keys, and position
+    values.
     """
 
     def __init__(self) -> None:
@@ -89,11 +95,64 @@ class ChunkController829(ChunkController):
         self.position_keys_info: int = 0
         self.position_time_format: int = 0
         self.tracks_aligned: int = 0
+        self.rotation_key_times: list[float] = []
+        self.position_key_times: list[float] = []
+        self.key_rotations: list[tuple[float, float, float, float]] = []
+        self.key_positions: list[tuple[float, float, float]] = []
+
+    def _align4(self, br: "BinaryReader") -> None:
+        if self.tracks_aligned:
+            pad = (-br.tell()) & 3
+            if pad:
+                br.skip(pad)
 
     def read(self, br: "BinaryReader") -> None:
         super().read(br)
         br.is_big_endian = False
-        # Body intentionally not parsed (matches C# reference).
+        if self.data_size <= 0:
+            return
+
+        self.controller_id = br.read_u32()
+        self.num_rotation_keys = br.read_u16()
+        self.num_position_keys = br.read_u16()
+        self.rotation_format = br.read_u8()
+        self.rotation_time_format = br.read_u8()
+        self.position_format = br.read_u8()
+        self.position_keys_info = br.read_u8()
+        self.position_time_format = br.read_u8()
+        self.tracks_aligned = br.read_u8()
+
+        # CONTROLLER_CHUNK_DESC_0829 is padded to a 4-byte boundary in
+        # CryEngine files even though its named fields total 14 bytes.
+        # Without this, rotation times are shifted and position tracks
+        # decode as huge nonsense values.
+        br.align_to(4)
+
+        self.key_rotations = [
+            _831_read_rotation(br, self.rotation_format)
+            for _ in range(self.num_rotation_keys)
+        ]
+        self._align4(br)
+
+        self.rotation_key_times = [
+            _831_read_time(br, self.rotation_time_format)
+            for _ in range(self.num_rotation_keys)
+        ]
+        self._align4(br)
+
+        self.key_positions = [
+            _831_read_position(br, self.position_format)
+            for _ in range(self.num_position_keys)
+        ]
+        self._align4(br)
+
+        if self.position_keys_info != 0:
+            self.position_key_times = [
+                _831_read_time(br, self.position_time_format)
+                for _ in range(self.num_position_keys)
+            ]
+        else:
+            self.position_key_times = list(self.rotation_key_times)
 
 
 # -- 0x905 ---------------------------------------------------------------
@@ -630,6 +689,7 @@ class ChunkController831(ChunkController):
 # -- 0x925 — MotionParameters (read-only metadata, no Blender wiring) ----
 
 
+@chunk(ChunkType.SpeedInfo, 0x925)
 @chunk(ChunkType.MotionParams, 0x925)
 class ChunkMotionParameters925(Chunk):
     """132-byte motion-params record. Read-only; not wired into the

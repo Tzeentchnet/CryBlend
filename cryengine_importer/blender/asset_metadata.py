@@ -18,11 +18,12 @@ via the Custom Properties API.
 
 from __future__ import annotations
 
+from collections.abc import Iterable as IterableABC, Mapping as MappingABC
 from typing import Any, Iterable, Mapping, Protocol
 
 
 KEY = "cryblend"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class _CollectionLike(Protocol):
@@ -46,8 +47,13 @@ def stamp_collection(
     axis_up: str = "Z",
     convert_axes: bool = True,
     import_related: bool = True,
+    import_cdf_composition: bool = True,
+    animations_dir: str | None = None,
     addon_version: str | None = None,
     public_params_by_material: Mapping[str, Mapping[str, str]] | None = None,
+    cdf_source_path: str | None = None,
+    cdf_attachments: Iterable[Mapping[str, Any]] = (),
+    cdf_warnings: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Stamp the import-time metadata onto ``collection``.
 
@@ -69,13 +75,25 @@ def stamp_collection(
         "axis_up": str(axis_up),
         "convert_axes": bool(convert_axes),
         "import_related": bool(import_related),
+        "import_cdf_composition": bool(import_cdf_composition),
+        "animations_dir": str(animations_dir) if animations_dir else "",
         "addon_version": str(addon_version) if addon_version else "",
+        "cdf_source_path": "",
+        "cdf_attachments": [],
+        "cdf_warnings": [],
     }
     if public_params_by_material:
         payload["public_params_by_material"] = {
             str(k): {str(pk): str(pv) for pk, pv in v.items()}
             for k, v in public_params_by_material.items()
         }
+    if cdf_source_path:
+        payload["cdf_source_path"] = str(cdf_source_path)
+        payload["cdf_attachments"] = [
+            {str(k): _json_safe(v) for k, v in dict(item).items()}
+            for item in cdf_attachments
+        ]
+        payload["cdf_warnings"] = [str(w) for w in cdf_warnings]
     collection[KEY] = payload
     # Return a deep-ish copy so callers can mutate freely.
     return dict(payload)
@@ -117,14 +135,104 @@ def read_metadata(collection: _CollectionLike) -> dict[str, Any] | None:
         data.setdefault("axis_up", "Z")
         data.setdefault("convert_axes", True)
         data.setdefault("import_related", True)
+        data.setdefault("import_cdf_composition", True)
+        data.setdefault("animations_dir", "")
         data.setdefault("addon_version", "")
         data["schema"] = SCHEMA_VERSION
+    if schema < 2:
+        data.setdefault("cdf_source_path", "")
+        data.setdefault("cdf_attachments", [])
+        data.setdefault("cdf_warnings", [])
+        data["schema"] = SCHEMA_VERSION
+    data.setdefault("cdf_source_path", "")
+    data.setdefault("cdf_attachments", [])
+    data.setdefault("cdf_warnings", [])
+    data.setdefault("animations_dir", "")
     # Coerce the list-typed fields back to plain lists for stable
     # comparison in tests (bpy hands back IDPropertyArray).
-    for list_key in ("material_libs", "material_libs_resolved"):
+    for list_key in (
+        "material_libs",
+        "material_libs_resolved",
+        "cdf_attachments",
+        "cdf_warnings",
+    ):
         if list_key in data:
             data[list_key] = list(data[list_key])
     return dict(data)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, MappingABC):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, IterableABC):
+        return [_json_safe(v) for v in value]
+    return str(value)
+
+
+def summarize_cdf_attachments(meta: Mapping[str, Any]) -> dict[str, Any]:
+    """Return count summaries for ``meta['cdf_attachments']``.
+
+    Kept here instead of the bpy panel so CDF UI logic can be tested
+    without importing Blender.
+    """
+    attachments = list(meta.get("cdf_attachments", []) or [])
+    by_type: dict[str, int] = {}
+    status: dict[str, int] = {"bound": 0, "empty": 0, "missing": 0}
+    empty_details: list[dict[str, Any]] = []
+    hidden: list[str] = []
+    hidden_details: list[dict[str, Any]] = []
+    ropes: list[str] = []
+
+    for item in attachments:
+        data = dict(item)
+        att_type = str(data.get("type") or "?")
+        by_type[att_type] = by_type.get(att_type, 0) + 1
+
+        state = str(data.get("status") or "")
+        if state in status:
+            status[state] += 1
+
+        name = str(data.get("name") or data.get("binding") or "<unnamed>")
+        if state == "empty":
+            detail: dict[str, Any] = {
+                "name": name,
+                "type": att_type,
+                "bone_name": str(data.get("bone_name") or ""),
+                "phys_prop_type": str(data.get("phys_prop_type") or ""),
+            }
+            if "flags" in data:
+                detail["flags"] = data.get("flags")
+            empty_details.append(detail)
+        if not bool(data.get("visible", True)):
+            hidden.append(name)
+            detail: dict[str, Any] = {
+                "name": name,
+                "type": att_type,
+                "status": state,
+                "binding": str(data.get("resolved_binding") or data.get("binding") or ""),
+            }
+            if data.get("bone_name"):
+                detail["bone_name"] = str(data.get("bone_name"))
+            if "flags" in data:
+                detail["flags"] = data.get("flags")
+            hidden_details.append(detail)
+        if str(data.get("phys_prop_type") or "").lower() == "rope":
+            ropes.append(name)
+
+    return {
+        "total": len(attachments),
+        "by_type": by_type,
+        "bound": status["bound"],
+        "empty": status["empty"],
+        "empty_details": empty_details,
+        "missing": status["missing"],
+        "hidden": hidden,
+        "hidden_details": hidden_details,
+        "ropes": ropes,
+        "warnings": list(meta.get("cdf_warnings", []) or []),
+    }
 
 
 def find_cryblend_collections(scene: Any) -> list[Any]:
@@ -155,6 +263,31 @@ def find_cryblend_collections(scene: Any) -> list[Any]:
     return out
 
 
+def _contains_named_item(container: Any, item: Any) -> bool:
+    name = getattr(item, "name", None)
+    if name is not None:
+        try:
+            if name in container:
+                return True
+        except TypeError:
+            pass
+
+    try:
+        if item in container:
+            return True
+    except TypeError:
+        pass
+
+    try:
+        return any(
+            child is item
+            or (name is not None and getattr(child, "name", None) == name)
+            for child in container
+        )
+    except TypeError:
+        return False
+
+
 def find_active_cryblend_collection(context: Any) -> Any | None:
     """Best-effort lookup of the user's "current" CryBlend collection.
 
@@ -181,7 +314,7 @@ def find_active_cryblend_collection(context: Any) -> Any | None:
             return cur
         for cand in candidates:
             children = getattr(cand, "children_recursive", None) or ()
-            if cur in children:
+            if _contains_named_item(children, cur):
                 return cand
 
     # 3: containing collection of the active object.
@@ -189,7 +322,7 @@ def find_active_cryblend_collection(context: Any) -> Any | None:
     if obj is not None:
         for cand in candidates:
             objs = getattr(cand, "all_objects", None) or getattr(cand, "objects", ())
-            if obj in objs:
+            if _contains_named_item(objs, obj):
                 return cand
 
     # 4: fall back to the first stamped collection.
@@ -204,4 +337,5 @@ __all__ = [
     "has_metadata",
     "read_metadata",
     "stamp_collection",
+    "summarize_cdf_attachments",
 ]

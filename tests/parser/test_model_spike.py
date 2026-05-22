@@ -76,6 +76,32 @@ def _synthetic_745_file() -> bytes:
     return bytes(payload)
 
 
+def _synthetic_744_file() -> bytes:
+    """Build a CryTek-0x744 file whose chunk table lives at EOF.
+
+    Old animation files do not store NumChunks in the fixed header;
+    the chunk count is implied by the table size.
+    """
+    chunk_offset = 20
+    chunk_size = 20
+    chunk_table_real_offset = chunk_offset + chunk_size
+    payload = bytearray()
+    payload.extend(b"CryTek\x00\x00")
+    payload.extend(struct.pack("<I", 0xFFFF0000))
+    payload.extend(struct.pack("<I", 0x744))
+    payload.extend(struct.pack("<i", chunk_table_real_offset - 4))
+    payload.extend(struct.pack("<I", 0xCCCC0009))
+    payload.extend(struct.pack("<I", 0x800))
+    payload.extend(struct.pack("<I", chunk_offset))
+    payload.extend(struct.pack("<i", 0xABCD))
+    payload.extend(b"data")
+    payload.extend(struct.pack("<I", 0xCCCC0009))
+    payload.extend(struct.pack("<I", 0x800))
+    payload.extend(struct.pack("<I", chunk_offset))
+    payload.extend(struct.pack("<i", 0xABCD))
+    return bytes(payload)
+
+
 def test_model_loads_synthetic_745_header() -> None:
     blob = _synthetic_745_file()
     m = Model.from_stream("synthetic.cgf", io.BytesIO(blob))
@@ -86,4 +112,20 @@ def test_model_loads_synthetic_745_header() -> None:
     hdr = m.chunk_headers[0]
     assert hdr.chunk_type == ChunkType.Light
     assert hdr.id == 0xABCD
+    assert 0xABCD in m.chunk_map
+
+
+def test_model_loads_synthetic_744_header_with_table_at_eof() -> None:
+    blob = _synthetic_744_file()
+
+    m = Model.from_stream("synthetic.anm", io.BytesIO(blob))
+
+    assert m.file_signature == "CryTek"
+    assert m.file_version == FileVersion.x0744
+    assert m.num_chunks == 1
+    assert len(m.chunk_headers) == 1
+    hdr = m.chunk_headers[0]
+    assert hdr.chunk_type == ChunkType.Light
+    assert hdr.id == 0xABCD
+    assert hdr.size == 20
     assert 0xABCD in m.chunk_map

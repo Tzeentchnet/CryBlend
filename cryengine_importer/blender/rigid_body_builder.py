@@ -6,9 +6,11 @@ Two sources of collision primitives feed this module:
   :class:`CompiledBone` and :class:`CompiledPhysicalBone`. Each
   non-empty AABB becomes one BOX-shaped Empty parented under the
   matching armature bone (``parent_type='BONE'``).
-* **Standalone ``MeshPhysicsData_800`` cube / cylinder primitives**
-  decoded from the model's chunk table. Each becomes one BOX or
-  CYLINDER Empty parented under the owning mesh object.
+* **Standalone ``MeshPhysicsData_800`` primitives** decoded from the
+    model's chunk table. Cube/cylinder records become BOX/CYLINDER
+    markers; embedded polyhedrons become wire mesh helpers. When a mesh
+    chunk references the physics chunk, helpers are parented under that
+    owning mesh object.
 
 The pure-Python ``plan_*`` functions return :class:`CollisionShape`
 descriptors and are unit-tested without ``bpy``. The ``apply_*``
@@ -16,9 +18,8 @@ functions consume those plans and create the corresponding Blender
 objects, attaching ``rigid_body`` Collision components when the
 scene's Rigid Body World is available.
 
-Polyhedron primitives are deliberately not handled here — the
-:mod:`cryengine_importer.models.physics` reader marks them
-``polyhedron_skipped=True`` and the planner ignores them.
+Polyhedron primitives that reference external data streams are still
+left unmaterialized because they do not carry standalone vertices.
 """
 
 from __future__ import annotations
@@ -69,6 +70,8 @@ class CollisionShape:
     dimensions: tuple[float, float, float]
     parent_bone: Optional[str] = None
     rotation_euler: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    vertices: tuple[tuple[float, float, float], ...] = ()
+    faces: tuple[tuple[int, int, int], ...] = ()
 
 
 # ---------------------------------------------------------- planners ------
@@ -131,7 +134,8 @@ def plan_mesh_physics_shapes(
     name_prefix: str = "physics",
 ) -> list[CollisionShape]:
     """Return one shape per ``ChunkMeshPhysicsData_800`` whose payload
-    decoded a CUBE / CYLINDER / UNKNOWN6 primitive.
+    decoded a CUBE / CYLINDER / UNKNOWN6 primitive or an embedded
+    POLYHEDRON mesh.
 
     The physical dimensions on the standalone ``PhysicsCube`` /
     ``PhysicsCylinder`` records aren't documented by pyffi (most
@@ -155,6 +159,25 @@ def plan_mesh_physics_shapes(
             PhysicsPrimitiveType.UNKNOWN6,
         ):
             shape = "CYLINDER"
+        elif primitive == PhysicsPrimitiveType.POLYHEDRON:
+            polyhedron = getattr(pd, "polyhedron", None)
+            if polyhedron is None or not polyhedron.has_embedded_geometry:
+                continue
+            vertices, faces = _polyhedron_mesh_data(polyhedron, pd.center)
+            if not vertices or not faces:
+                continue
+            shapes.append(
+                CollisionShape(
+                    name=f"{name_prefix}_{i}_polyhedron",
+                    shape="MESH",
+                    location=pd.center,
+                    dimensions=_mesh_dimensions(polyhedron.vertices),
+                    parent_bone=None,
+                    vertices=vertices,
+                    faces=faces,
+                )
+            )
+            continue
         else:
             continue
         shapes.append(
@@ -167,6 +190,39 @@ def plan_mesh_physics_shapes(
             )
         )
     return shapes
+
+
+def _polyhedron_mesh_data(
+    polyhedron,
+    center: tuple[float, float, float],
+) -> tuple[tuple[tuple[float, float, float], ...], tuple[tuple[int, int, int], ...]]:
+    vertices = tuple(
+        (
+            vertex[0] - center[0],
+            vertex[1] - center[1],
+            vertex[2] - center[2],
+        )
+        for vertex in polyhedron.vertices
+    )
+    vertex_count = len(vertices)
+    faces = tuple(
+        triangle
+        for triangle in polyhedron.triangles
+        if all(0 <= vertex_index < vertex_count for vertex_index in triangle)
+    )
+    return vertices, faces
+
+
+def _mesh_dimensions(
+    vertices: tuple[tuple[float, float, float], ...],
+) -> tuple[float, float, float]:
+    if not vertices:
+        return (0.0, 0.0, 0.0)
+    return tuple(
+        max(vertex[axis] for vertex in vertices)
+        - min(vertex[axis] for vertex in vertices)
+        for axis in range(3)
+    )  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------- bpy bridge ----
@@ -194,8 +250,9 @@ def apply_collision_shapes(
     BOX shapes become Empties (``empty_display_type='CUBE'``) — they
     accept ``rigid_body`` Collision components and stay lightweight.
     CYLINDER shapes become a small Mesh cylinder (Blender Empties
-    have no cylinder display type), still parented under the requested
-    bone or object.
+    have no cylinder display type). MESH shapes become wire mesh
+    proxies from decoded embedded polyhedron physics. All are parented
+    under the requested bone or object.
 
     ``add_rigid_body`` adds a passive Rigid Body Collision component
     to each new object, but only when ``bpy.context.scene`` already
@@ -247,7 +304,8 @@ def _make_collision_object(shape: CollisionShape) -> "bpy.types.Object":
     """Create the bpy object that visually represents ``shape``.
 
     BOX -> Empty (CUBE display); CYLINDER -> low-poly cylinder mesh
-    (Empties have no cylinder display type).
+    (Empties have no cylinder display type); MESH -> decoded physics
+    proxy mesh.
     """
     import bpy  # type: ignore[import-not-found]
 
@@ -260,6 +318,14 @@ def _make_collision_object(shape: CollisionShape) -> "bpy.types.Object":
         # display goes from -1 to +1 along each axis, hence half-extent.
         empty.scale = tuple(d * 0.5 for d in shape.dimensions)
         return empty
+
+    if shape.shape == "MESH":
+        mesh = bpy.data.meshes.new(shape.name + "_mesh")
+        mesh.from_pydata(list(shape.vertices), [], [list(face) for face in shape.faces])
+        mesh.update()
+        obj = bpy.data.objects.new(shape.name, mesh)
+        obj.display_type = "WIRE"
+        return obj
 
     # CYLINDER fallback: small placeholder mesh. We avoid bmesh here
     # because the geometry is just a marker and a primitive cylinder
@@ -328,29 +394,52 @@ def build_rigid_bodies(
         )
 
     if node_to_obj:
+        parent_by_physics_id = _physics_parent_by_chunk_id(cryengine, node_to_obj)
+        fallback_parent = next(
+            (
+                obj
+                for obj in node_to_obj.values()
+                if getattr(obj, "type", None) == "MESH"
+            ),
+            None,
+        )
         for model in cryengine.models:
             phys_chunks = [
-                c
-                for c in model.chunk_map.values()
-                if type(c).__name__.startswith("ChunkMeshPhysicsData")
+                chunk
+                for chunk in model.chunk_map.values()
+                if type(chunk).__name__.startswith("ChunkMeshPhysicsData")
             ]
             if not phys_chunks:
                 continue
-            mesh_shapes = plan_mesh_physics_shapes(phys_chunks)
-            # Parent under the first mesh object we have for this model
-            # — CryEngine doesn't link MeshPhysicsData chunks back to a
-            # specific node, so first-mesh is the best we can do here.
-            parent = next(
-                (o for o in node_to_obj.values() if getattr(o, "type", None) == "MESH"),
-                None,
-            )
-            created.extend(
-                apply_collision_shapes(
-                    mesh_shapes,
-                    parent_obj=parent,
-                    collection=collection,
-                    add_rigid_body=add_rigid_body,
+            for chunk_index, phys_chunk in enumerate(phys_chunks):
+                chunk_id = int(getattr(phys_chunk, "id", chunk_index))
+                mesh_shapes = plan_mesh_physics_shapes(
+                    [phys_chunk], name_prefix=f"physics_{chunk_id}"
                 )
-            )
+                parent = parent_by_physics_id.get(chunk_id, fallback_parent)
+                created.extend(
+                    apply_collision_shapes(
+                        mesh_shapes,
+                        parent_obj=parent,
+                        collection=collection,
+                        add_rigid_body=add_rigid_body,
+                    )
+                )
 
     return created
+
+
+def _physics_parent_by_chunk_id(
+    cryengine: "CryEngine",
+    node_to_obj: "dict[int, bpy.types.Object]",
+) -> "dict[int, bpy.types.Object]":
+    parent_by_id = {}
+    for node in getattr(cryengine, "nodes", []):
+        obj = node_to_obj.get(getattr(node, "id", -1))
+        mesh = getattr(node, "mesh_data", None)
+        if obj is None or mesh is None:
+            continue
+        for physics_id in getattr(mesh, "physics_data", []) or []:
+            if physics_id:
+                parent_by_id.setdefault(int(physics_id), obj)
+    return parent_by_id

@@ -27,6 +27,9 @@ class ControllerKey:
     time: int = 0
     abs_pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
     rel_pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    rel_quat: tuple[float, float, float, float] | None = None
+    unknown1: tuple[float, float, float] | None = None
+    unknown2: tuple[float, float] | None = None
 
 
 # -- Controller_905 sub-records ------------------------------------------
@@ -105,6 +108,8 @@ class ChrParamsAnimation:
 
     name: Optional[str] = None
     path: Optional[str] = None
+    source_file_name: Optional[str] = None
+    base_path: Optional[str] = None
 
 
 @dataclass
@@ -112,7 +117,10 @@ class ChrParams:
     """Port of ChrParams/ChrParams.cs."""
 
     source_file_name: Optional[str] = None
+    animation_base_path: Optional[str] = None
     animations: list[ChrParamsAnimation] = field(default_factory=list)
+    includes: list[str] = field(default_factory=list)
+    missing_includes: list[str] = field(default_factory=list)
 
 
 # -- Per-bone animation track (consumer-facing) --------------------------
@@ -147,7 +155,37 @@ class AnimationClip:
 
     name: str = ""
     duration_secs: float = 0.0
+    source_file_name: str = ""
+    clip_kind: str = "full_body"
+    is_additive: bool = False
+    rotation_track_count: int = 0
+    position_track_count: int = 0
+    skipped_root_tracks: int = 0
+    skipped_position_tracks: int = 0
     tracks: list[BoneAnimationTrack] = field(default_factory=list)
+
+
+@dataclass
+class ObjectAnimationTrack:
+    """One CGA scene node's local transform animation."""
+
+    node_id: int = 0
+    node_name: str = ""
+    pos_times: list[float] = field(default_factory=list)
+    positions: list[tuple[float, float, float]] = field(default_factory=list)
+    rot_times: list[float] = field(default_factory=list)
+    rotations: list[tuple[float, float, float, float]] = field(default_factory=list)
+    scale_times: list[float] = field(default_factory=list)
+    scales: list[tuple[float, float, float]] = field(default_factory=list)
+
+
+@dataclass
+class ObjectAnimationClip:
+    """One playable object-transform animation for CGA-style assets."""
+
+    name: str = ""
+    duration_secs: float = 0.0
+    tracks: list[ObjectAnimationTrack] = field(default_factory=list)
 
 
 __all__ = [
@@ -159,4 +197,6 @@ __all__ = [
     "ChrParams",
     "BoneAnimationTrack",
     "AnimationClip",
+    "ObjectAnimationTrack",
+    "ObjectAnimationClip",
 ]

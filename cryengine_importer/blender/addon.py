@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import bpy  # type: ignore[import-not-found]
 from bpy.props import (  # type: ignore[import-not-found]
@@ -38,13 +39,13 @@ class IMPORT_OT_cryengine(Operator, ImportHelper):
     """Import a CryEngine model file."""
 
     bl_idname = "import_scene.cryengine"
-    bl_label = "Import CryEngine (.cgf/.chr/.skin)"
+    bl_label = "Import CryEngine (.cgf/.chr/.skin/.cdf)"
     bl_options = {"PRESET", "UNDO"}
 
     filename_ext = ".cgf"
     filter_glob: StringProperty(  # type: ignore[valid-type]
         default=(
-            "*.cgf;*.cga;*.cgam;*.cgfm;*.chr;*.chrm;*.skin;*.skinm"
+            "*.cgf;*.cga;*.cgam;*.cgfm;*.chr;*.chrm;*.skin;*.skinm;*.cdf"
         ),
         options={"HIDDEN"},
     )
@@ -69,12 +70,30 @@ class IMPORT_OT_cryengine(Operator, ImportHelper):
         default="",
         subtype="DIR_PATH",
     )
+    animations_dir: StringProperty(  # type: ignore[valid-type]
+        name="Animations Directory",
+        description=(
+            "Optional Crysis 2 animation root used to resolve .chrparams "
+            "wildcards when animations are extracted outside the asset root."
+        ),
+        default="",
+        subtype="DIR_PATH",
+    )
     import_related: BoolProperty(  # type: ignore[valid-type]
         name="Import Related Files",
         description=(
             "Also load sibling files referenced by the imported asset: "
             "geometry companions (.cgam/.chrm), chrparams animation "
             "lists, and the CAF/ANIM clips they reference."
+        ),
+        default=True,
+    )
+    import_cdf_composition: BoolProperty(  # type: ignore[valid-type]
+        name="Import CDF Composition",
+        description=(
+            "When importing a .cdf, assemble its base model and attachments. "
+            "When importing a .chr/.skin, use a uniquely matching nearby CDF "
+            "when one can be found."
         ),
         default=True,
     )
@@ -127,7 +146,9 @@ class IMPORT_OT_cryengine(Operator, ImportHelper):
     def draw(self, context):  # type: ignore[no-untyped-def]
         layout = self.layout
         layout.prop(self, "import_related")
+        layout.prop(self, "import_cdf_composition")
         layout.prop(self, "object_dir")
+        layout.prop(self, "animations_dir")
         layout.prop(self, "convert_axes")
         col = layout.column()
         col.enabled = self.convert_axes
@@ -160,22 +181,137 @@ class IMPORT_OT_cryengine(Operator, ImportHelper):
         if self.filepath:
             yield self.filepath
 
-    def _import_one(self, filepath: str) -> tuple[bool, str]:
+    def _global_matrix(self):
+        if not self.convert_axes:
+            return None
+        return axis_conversion(
+            from_forward=self.axis_forward,
+            from_up=self.axis_up,
+            to_forward="-Y",
+            to_up="Z",
+        ).to_4x4()
+
+    def _guess_game_root(self, filepath: str) -> str | None:
+        path = Path(filepath).resolve()
+        parts = path.parts
+        for i, part in enumerate(parts):
+            if part.lower() == "objects" and i > 0:
+                return str(Path(*parts[:i]))
+        return None
+
+    def _relative_to_root(self, filepath: str, root: str) -> str | None:
+        try:
+            return Path(filepath).resolve().relative_to(Path(root).resolve()).as_posix()
+        except ValueError:
+            return None
+
+    def _with_animation_layer(self, pack_fs):
+        from ..io.pack_fs import CascadedPackFileSystem
+
+        if not self.animations_dir:
+            return pack_fs
+        return CascadedPackFileSystem(
+            [pack_fs, RealFileSystem(self.animations_dir)]
+        )
+
+    def _geometry_context(self, filepath: str):
         from ..io.pack_fs import CascadedPackFileSystem
 
         root_dir = os.path.dirname(filepath) or "."
-        pack_fs: object = RealFileSystem(root_dir)
-        if self.object_dir:
-            obj_dir_fs = RealFileSystem(self.object_dir)
-            pack_fs = CascadedPackFileSystem([obj_dir_fs, pack_fs])
-        rel_path = os.path.basename(filepath)
+        object_root = self.object_dir or self._guess_game_root(filepath)
+        if object_root:
+            rel = self._relative_to_root(filepath, object_root)
+            if rel is not None:
+                return self._with_animation_layer(RealFileSystem(object_root)), rel, object_root
+            pack_fs = CascadedPackFileSystem(
+                [RealFileSystem(object_root), RealFileSystem(root_dir)]
+            )
+            return self._with_animation_layer(pack_fs), os.path.basename(filepath), object_root
+        return self._with_animation_layer(RealFileSystem(root_dir)), os.path.basename(filepath), None
 
+    def _cdf_context(self, filepath: str):
+        from ..io.pack_fs import CascadedPackFileSystem
+
+        root_dir = os.path.dirname(filepath) or "."
+        object_root = self.object_dir or self._guess_game_root(filepath)
+        if object_root:
+            rel = self._relative_to_root(filepath, object_root)
+            if rel is not None:
+                return self._with_animation_layer(RealFileSystem(object_root)), rel, object_root
+            pack_fs = CascadedPackFileSystem(
+                [RealFileSystem(object_root), RealFileSystem(root_dir)]
+            )
+            return self._with_animation_layer(pack_fs), os.path.basename(filepath), object_root
+        return self._with_animation_layer(RealFileSystem(root_dir)), os.path.basename(filepath), None
+
+    def _auto_cdf_context(self, filepath: str):
+        from ..core.cdf_assembly import find_cdfs_for_model
+
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext not in {".chr", ".skin"} or not self.import_cdf_composition:
+            return None
+
+        object_root = self.object_dir or self._guess_game_root(filepath)
+        if object_root:
+            rel = self._relative_to_root(filepath, object_root)
+            if rel is not None:
+                pack_fs = RealFileSystem(object_root)
+                matches = find_cdfs_for_model(rel, pack_fs)
+                if len(matches) == 1:
+                    return self._with_animation_layer(pack_fs), matches[0], object_root
+                if len(matches) > 1:
+                    self.report(
+                        {"WARNING"},
+                        f"Multiple CDFs reference {os.path.basename(filepath)}; "
+                        "import a .cdf directly to choose one.",
+                    )
+                    return None
+
+        root_dir = os.path.dirname(filepath) or "."
+        pack_fs = RealFileSystem(root_dir)
+        matches = find_cdfs_for_model(os.path.basename(filepath), pack_fs)
+        if len(matches) == 1:
+            return self._with_animation_layer(pack_fs), matches[0], None
+        if len(matches) > 1:
+            self.report(
+                {"WARNING"},
+                f"Multiple CDFs reference {os.path.basename(filepath)}; "
+                "import a .cdf directly to choose one.",
+            )
+        return None
+
+    def _import_one(self, filepath: str) -> tuple[bool, str]:
         with attach_for_operator(self, verbose=self.verbose):
+            ext = os.path.splitext(filepath)[1].lower()
+            global_matrix = self._global_matrix()
+
             try:
+                if ext == ".cdf":
+                    pack_fs, rel_path, object_dir = self._cdf_context(filepath)
+                    return self._import_cdf(
+                        filepath,
+                        rel_path,
+                        pack_fs,
+                        object_dir,
+                        global_matrix,
+                    )
+
+                auto_cdf = self._auto_cdf_context(filepath)
+                if auto_cdf is not None:
+                    pack_fs, rel_path, object_dir = auto_cdf
+                    return self._import_cdf(
+                        filepath,
+                        rel_path,
+                        pack_fs,
+                        object_dir,
+                        global_matrix,
+                    )
+
+                pack_fs, rel_path, object_dir = self._geometry_context(filepath)
                 asset = CryEngine(
                     rel_path,
                     pack_fs,  # type: ignore[arg-type]
-                    object_dir=self.object_dir or None,
+                    object_dir=object_dir,
                     load_related=self.import_related,
                 )
                 asset.process()
@@ -185,14 +321,6 @@ class IMPORT_OT_cryengine(Operator, ImportHelper):
                 return False, f"Failed to parse {filepath}: {exc}"
 
             try:
-                global_matrix = None
-                if self.convert_axes:
-                    global_matrix = axis_conversion(
-                        from_forward=self.axis_forward,
-                        from_up=self.axis_up,
-                        to_forward="-Y",
-                        to_up="Z",
-                    ).to_4x4()
                 collection = build_scene(asset, global_matrix=global_matrix)
             except Exception as exc:  # pragma: no cover - exercised in Blender
                 return False, f"Failed to build scene for {filepath}: {exc}"
@@ -207,13 +335,15 @@ class IMPORT_OT_cryengine(Operator, ImportHelper):
                 stamp_collection(
                     collection,
                     source_path=filepath,
-                    object_dir=self.object_dir or None,
+                    object_dir=object_dir,
                     material_libs=asset.material_library_files,
                     material_libs_resolved=list(asset.materials.keys()),
                     axis_forward=self.axis_forward,
                     axis_up=self.axis_up,
                     convert_axes=self.convert_axes,
                     import_related=self.import_related,
+                    import_cdf_composition=self.import_cdf_composition,
+                    animations_dir=self.animations_dir or None,
                     addon_version=_addon_version_string(),
                     public_params_by_material=pp_cache or None,
                 )
@@ -226,22 +356,103 @@ class IMPORT_OT_cryengine(Operator, ImportHelper):
             if (
                 asset.material_library_files
                 and len(asset.materials) < len(asset.material_library_files)
-                and not self.object_dir
             ):
-                self.report(
-                    {"WARNING"},
-                    f"{len(asset.material_library_files) - len(asset.materials)} "
-                    f"material librar(y/ies) failed to resolve. Set the "
-                    f"'Object Directory' field in the import dialog to your "
-                    f"game's data root (where 'Objects/' lives).",
-                )
+                missing = len(asset.material_library_files) - len(asset.materials)
+                if object_dir:
+                    self.report(
+                        {"WARNING"},
+                        f"{missing} material librar(y/ies) failed to resolve.",
+                    )
+                else:
+                    self.report(
+                        {"WARNING"},
+                        f"{missing} material librar(y/ies) failed to resolve. Set the "
+                        f"'Object Directory' field in the import dialog to your "
+                        f"game's data root (where 'Objects/' lives).",
+                    )
 
         return True, (
             f"Imported {asset.name}: {len(asset.nodes)} nodes, "
             f"{len(collection.objects)} objects, "
             f"{len(asset.materials)}/{len(asset.material_library_files)} "
             f"material libs loaded, "
-            f"{len(asset.animation_clips)} animation clips"
+            f"{len(asset.animation_clips)} skeletal clips, "
+            f"{len(getattr(asset, 'object_animation_clips', []))} object clips"
+        )
+
+    def _import_cdf(
+        self,
+        source_path: str,
+        cdf_path: str,
+        pack_fs,
+        object_dir: str | None,
+        global_matrix,
+    ) -> tuple[bool, str]:
+        from .cdf_scene_builder import build_cdf_scene
+
+        try:
+            result = build_cdf_scene(
+                cdf_path,
+                pack_fs,
+                object_dir=object_dir,
+                load_related=self.import_related,
+                global_matrix=global_matrix,
+            )
+        except Exception as exc:  # pragma: no cover - exercised in Blender
+            return False, f"Failed to import CDF {source_path}: {exc}"
+
+        cdf_attachments = []
+        cdf_warnings = list(result.warnings)
+        for built in result.attachments:
+            att = built.plan.attachment
+            cdf_attachments.append(
+                {
+                    "name": att.name,
+                    "type": att.type,
+                    "binding": att.binding,
+                    "resolved_binding": built.plan.resolved_binding or "",
+                    "bone_name": att.bone_name,
+                    "flags": int(att.flags),
+                    "visible": bool(built.plan.visible),
+                    "status": built.plan.status,
+                    "material": built.plan.material or "",
+                    "phys_prop_type": att.phys_prop_type or "",
+                    "rope_lods": att.rope_lods,
+                }
+            )
+            cdf_warnings.extend(built.warnings)
+
+        try:
+            stamp_collection(
+                result.collection,
+                source_path=source_path,
+                object_dir=object_dir,
+                material_libs=result.material_library_files,
+                material_libs_resolved=result.material_library_keys,
+                axis_forward=self.axis_forward,
+                axis_up=self.axis_up,
+                convert_axes=self.convert_axes,
+                import_related=self.import_related,
+                import_cdf_composition=self.import_cdf_composition,
+                animations_dir=self.animations_dir or None,
+                addon_version=_addon_version_string(),
+                cdf_source_path=cdf_path,
+                cdf_attachments=cdf_attachments,
+                cdf_warnings=cdf_warnings,
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger = __import__("logging").getLogger(__name__)
+            logger.debug("failed to stamp cdf metadata", exc_info=True)
+
+        if cdf_warnings:
+            self.report({"WARNING"}, f"CDF imported with {len(cdf_warnings)} warning(s).")
+
+        object_count = _collection_object_count(result.collection)
+        return True, (
+            f"Imported CDF {Path(cdf_path).stem}: "
+            f"{len(result.attachments)} attachments, {object_count} objects, "
+            f"{len(result.material_library_keys)}/{len(result.material_library_files)} "
+            f"material libs loaded"
         )
 
     def execute(self, context):  # type: ignore[no-untyped-def]
@@ -289,7 +500,7 @@ class IO_FH_cryengine(bpy.types.FileHandler):
     bl_idname = "IO_FH_cryengine"
     bl_label = "CryEngine"
     bl_import_operator = IMPORT_OT_cryengine.bl_idname
-    bl_file_extensions = ".cgf;.cga;.cgam;.cgfm;.chr;.chrm;.skin;.skinm"
+    bl_file_extensions = ".cgf;.cga;.cgam;.cgfm;.chr;.chrm;.skin;.skinm;.cdf"
 
     @classmethod
     def poll_drop(cls, context):  # type: ignore[no-untyped-def]
@@ -299,7 +510,17 @@ class IO_FH_cryengine(bpy.types.FileHandler):
 
 
 def menu_func_import(self, context):  # type: ignore[no-untyped-def]
-    self.layout.operator(IMPORT_OT_cryengine.bl_idname, text="CryEngine (.cgf/.chr/.skin)")
+    self.layout.operator(
+        IMPORT_OT_cryengine.bl_idname,
+        text="CryEngine (.cgf/.chr/.skin/.cdf)",
+    )
+
+
+def _collection_object_count(collection) -> int:  # type: ignore[no-untyped-def]
+    count = len(collection.objects)
+    for child in collection.children:
+        count += _collection_object_count(child)
+    return count
 
 
 _classes = (IMPORT_OT_cryengine, IO_FH_cryengine)

@@ -71,6 +71,18 @@ def test_keeps_unrelated_assets(tmp_path):
     assert skipped == 0
 
 
+def test_keeps_cdf_next_to_chr_in_batch(tmp_path):
+    chr_path = tmp_path / "grunt_base.chr"
+    cdf_path = tmp_path / "grunt.cdf"
+    _touch(chr_path)
+    _touch(cdf_path)
+
+    kept, skipped = canonicalize_import_paths([str(chr_path), str(cdf_path)])
+
+    assert kept == [str(chr_path), str(cdf_path)]
+    assert skipped == 0
+
+
 @pytest.mark.parametrize(
     "primary_ext,companion_ext",
     [(".cga", ".cgam"), (".chr", ".chrm"), (".skin", ".skinm")],

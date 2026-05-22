@@ -20,8 +20,8 @@ Skinning / armature are deferred to Phase 3.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
@@ -30,10 +30,12 @@ import bpy  # type: ignore[import-not-found]
 from mathutils import Matrix  # type: ignore[import-not-found]
 
 from ..core.mesh_builder import build_geometry
+from ..core.material_resolution import resolve_material_for_subset
 from ..enums import HelperType
 from ..models.geometry import MeshGeometry
-from .action_builder import build_actions
+from .action_builder import build_actions, build_object_actions
 from .armature_builder import attach_skin, build_armature
+from .import_visibility import apply_import_visibility_defaults
 from .material_builder import build_material
 from .rigid_body_builder import build_rigid_bodies
 
@@ -41,6 +43,14 @@ if TYPE_CHECKING:
     from ..core.chunks.node import ChunkNode
     from ..core.cryengine import CryEngine
     from ..materials.material import Material
+
+
+@dataclass
+class SceneBuildResult:
+    collection: "bpy.types.Collection"
+    node_to_obj: dict[int, "bpy.types.Object"]
+    armature_obj: "bpy.types.Object | None" = None
+    collision_objects: list["bpy.types.Object"] | None = None
 
 
 def build_scene(
@@ -56,6 +66,29 @@ def build_scene(
     CryEngine orientation (Z-up, +Y-forward) into Blender's
     (Z-up, -Y-forward) — see :func:`bpy_extras.io_utils.axis_conversion`.
     Children inherit the rotation through their parent.
+    """
+    return build_scene_result(
+        cryengine,
+        collection=collection,
+        global_matrix=global_matrix,
+    ).collection
+
+
+def build_scene_result(
+    cryengine: "CryEngine",
+    *,
+    collection: "bpy.types.Collection | None" = None,
+    global_matrix: "Matrix | None" = None,
+    existing_armature_obj: "bpy.types.Object | None" = None,
+    build_armature_enabled: bool = True,
+    build_actions_enabled: bool = True,
+    build_rigid_bodies_enabled: bool = True,
+) -> SceneBuildResult:
+    """Materialize ``cryengine`` and return created object mappings.
+
+    ``build_scene`` remains the public convenience wrapper. CDF import
+    needs the richer result so skinned attachments can reuse the base
+    armature instead of creating a second skeleton.
     """
     if collection is None:
         collection = bpy.data.collections.new(cryengine.name)
@@ -83,25 +116,31 @@ def build_scene(
             obj.matrix_world = local
 
     # --- skinning (Phase 3) ------------------------------------------
-    arm_obj: "bpy.types.Object | None" = None
+    arm_obj: "bpy.types.Object | None" = existing_armature_obj
     if cryengine.skinning_info.has_skinning_info:
-        arm_obj = build_armature(cryengine, collection=collection)
+        if arm_obj is None and build_armature_enabled:
+            arm_obj = build_armature(cryengine, collection=collection)
         if arm_obj is not None:
             for obj in node_to_obj.values():
                 if obj.type == "MESH":
                     attach_skin(arm_obj, obj, cryengine)
 
             # --- animation (Phase 4) ---------------------------------
-            if cryengine.animation_clips:
+            if build_actions_enabled and cryengine.animation_clips:
                 build_actions(cryengine, arm_obj)
 
+    if getattr(cryengine, "object_animation_clips", None):
+        build_object_actions(cryengine, node_to_obj)
+
     # --- physics / rigid body collision proxies (Phase 10) ------------
-    build_rigid_bodies(
-        cryengine,
-        armature_obj=arm_obj,
-        node_to_obj=node_to_obj,
-        collection=collection,
-    )
+    collision_objects: list["bpy.types.Object"] = []
+    if build_rigid_bodies_enabled:
+        collision_objects = build_rigid_bodies(
+            cryengine,
+            armature_obj=arm_obj,
+            node_to_obj=node_to_obj,
+            collection=collection,
+        )
 
     # --- axis conversion (applied last so it covers armature roots
     # produced by attach_skin reparenting). Premultiplies every
@@ -112,7 +151,20 @@ def build_scene(
             if obj.parent is None:
                 obj.matrix_world = global_matrix @ obj.matrix_world
 
-    return collection
+    visibility_objects = list(node_to_obj.values())
+    if arm_obj is not None and arm_obj not in visibility_objects:
+        visibility_objects.append(arm_obj)
+    for obj in collision_objects:
+        if obj not in visibility_objects:
+            visibility_objects.append(obj)
+    apply_import_visibility_defaults(visibility_objects)
+
+    return SceneBuildResult(
+        collection=collection,
+        node_to_obj=node_to_obj,
+        armature_obj=arm_obj,
+        collision_objects=collision_objects,
+    )
 
 
 # ---------------------------------------------------------------- helpers
@@ -286,32 +338,8 @@ def _apply_shape_keys(
 def _resolve_material(
     cryengine: "CryEngine", node: "ChunkNode", mat_id: int
 ) -> "Material | None":
-    """Look up the parsed `Material` for a subset of ``node``.
-
-    Path: ``node.material_id -> ChunkMtlName.name -> stem -> library
-    -> sub_materials[mat_id]``. Returns ``None`` when any link is
-    missing so the caller can fall back to a placeholder.
-    """
-    if not cryengine.materials or node.material_id == 0:
-        return None
-
-    if not cryengine.models:
-        return None
-    mtl_chunk = cryengine.models[0].chunk_map.get(node.material_id)
-    if mtl_chunk is None:
-        return None
-    name = getattr(mtl_chunk, "name", None)
-    if not name:
-        return None
-
-    key = PurePosixPath(name).stem.lower() or name.lower()
-    library = cryengine.materials.get(key)
-    if library is None:
-        return None
-    subs = library.sub_materials or [library]
-    if 0 <= mat_id < len(subs):
-        return subs[mat_id]
-    return subs[0] if subs else None
+    """Look up the parsed `Material` for a subset of ``node``."""
+    return resolve_material_for_subset(cryengine, node, mat_id)
 
 
 def _placeholder_material(name: str) -> "bpy.types.Material":
@@ -335,4 +363,4 @@ def _row_major_to_matrix(rows: tuple) -> "Matrix":
     )
 
 
-__all__ = ["build_scene"]
+__all__ = ["SceneBuildResult", "build_scene", "build_scene_result"]
