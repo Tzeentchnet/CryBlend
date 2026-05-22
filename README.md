@@ -13,8 +13,7 @@ Current manifest version: **0.1.6** (`dist/cryengine_importer-0.1.6.zip`).
 
 ### From a release zip
 
-1. Download `cryengine_importer-<version>.zip` from the
-   [Releases](https://github.com/Markemp/CryBlend/releases) page.
+1. Download `cryengine_importer-<version>.zip` from the [Releases](https://github.com/Tzeentchnet/CryBlend/releases) page.
 2. In Blender 5.0+: **Edit → Preferences → Get Extensions → ⌄ → Install
    from Disk…** and pick the zip. Or simply drag the zip into the
    Blender window.
@@ -23,13 +22,24 @@ Current manifest version: **0.1.6** (`dist/cryengine_importer-0.1.6.zip`).
 ### From source
 
 ```pwsh
-git clone https://github.com/Markemp/CryBlend.git
+git clone https://github.com/Tzeentchnet/CryBlend.git
 cd CryBlend
 python scripts/build_extension.py
 # Install the resulting dist/cryengine_importer-<version>.zip as above.
 ```
 
 ## Supported formats
+
+### Game support summary
+
+| Game / asset family | Support level | Current coverage |
+| --- | --- | --- |
+| Crysis 1 / CryEngine 2 | Targeted | Geometry, skinned characters, CDF assembly, classic CAF/DBA animation, materials, vanilla `.pak`/ZIP assets, and the CE2 authoring audit profile. |
+| Crysis 2 | Targeted | Core CryEngine import path plus `.chrparams` animation discovery, nested animation-root handling, and the Crysis 2 tool profile. |
+| Crysis 3 | Targeted | Core CryEngine import path plus Crysis 3 metadata/audit helpers, profile skin-weight limits, and nested animation-folder discovery. |
+| Star Citizen | Partial | IVO geometry, skinned meshes, `#caf` / `#dba` animation blocks, CryXmlB/pbxml materials, and SC 4.5+ chunk IDs; `.p4k` streaming still requires extraction or repackaging first. |
+| ArcheAge | Partial | `.cal` animation-list resolution and ArcheAge controller variants (`Controller_827/828/830/831`); broader workflows depend on available sample coverage. |
+| Other CryEngine titles | Experimental | Stock CGF/CGA/CHR/SKIN/CDF/MTL and `.pak`-style layouts may import when their chunk versions match the implemented readers. |
 
 ### File formats ingested
 
@@ -257,23 +267,6 @@ step, because Windows can lock the existing extension folder.
 
 For version **0.1.6**, the local build artifact is
 `dist/cryengine_importer-0.1.6.zip`.
-
-## Development
-
-```pwsh
-# Parser-only tests (no Blender required):
-python -m pytest tests/parser
-
-# Headless Blender smoke test (requires Blender 5+ on PATH):
-blender --background --python tests/headless_smoke.py -- path/to/file.cdf
-blender --background --python tests/headless_smoke.py -- --reimport path/to/file.cdf
-```
-
-Optional local sample tests in `tests/parser/test_local_samples.py` are
-env-gated so CI can skip them when sample assets are absent. Set
-`CRY_ATLS_DIR`, `CRY_SEWERS_DIR`, or `CRY3_OBJECTS_DIR` to point at
-local extracts; the Crysis 3 squirrel cases validate `.chrparams`
-discovery through CAF clip creation, including nested animation folders.
 
 ## Known issues / limitations
 
